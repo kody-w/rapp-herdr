@@ -135,6 +135,7 @@
     }
     .button.primary:hover { background: var(--cp-accent-hover); }
     .button:disabled { cursor: wait; opacity: 0.65; }
+    .file-input { display: none; }
     .live {
       display: inline-flex;
       align-items: center;
@@ -405,6 +406,15 @@
           <span class="dot" id="liveDot"></span>
           <span id="liveText">Connecting</span>
         </div>
+        <button class="button" id="exportBackupButton" type="button">Export backup</button>
+        <button class="button" id="importBackupButton" type="button">Import backup</button>
+        <input
+          class="file-input"
+          id="backupFile"
+          type="file"
+          accept="application/json,.json"
+          aria-label="Choose an estate backup to import"
+        />
         <button class="button primary" id="refreshButton" type="button">Refresh shape</button>
       </div>
     </header>
@@ -447,6 +457,9 @@
       error: document.getElementById("error"),
       search: document.getElementById("search"),
       autoRefresh: document.getElementById("autoRefresh"),
+      exportBackupButton: document.getElementById("exportBackupButton"),
+      importBackupButton: document.getElementById("importBackupButton"),
+      backupFile: document.getElementById("backupFile"),
     };
 
     let snapshot = null;
@@ -683,7 +696,65 @@
       }
     }
 
+    function showError(error) {
+      ui.error.hidden = false;
+      ui.error.textContent = error instanceof Error ? error.message : String(error);
+    }
+
+    function exportBackup() {
+      const link = document.createElement("a");
+      link.href = `/api/backup?token=${encodeURIComponent(dashboardToken)}`;
+      link.download = "";
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      ui.liveText.textContent = "Backup exported";
+    }
+
+    async function importBackup(file) {
+      if (!file) return;
+      if (file.size > 2 * 1024 * 1024) {
+        throw new Error("Backup exceeds the 2 MB safety limit.");
+      }
+      const payload = await file.text();
+      JSON.parse(payload);
+      if (!window.confirm(
+        "Restore this estate backup? The current estate.json will be retained as a rollback copy."
+      )) {
+        return;
+      }
+      ui.importBackupButton.disabled = true;
+      ui.error.hidden = true;
+      try {
+        const response = await fetch("/api/backup/import", {
+          method: "POST",
+          cache: "no-store",
+          headers: {
+            "Content-Type": "application/json",
+            "X-RAPP-Herdr-Token": dashboardToken,
+          },
+          body: payload,
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+        ui.liveText.textContent = "Backup restored";
+        window.alert(
+          `Estate restored. Previous manifest retained at:\n${data.previous_manifest}`
+        );
+        await refresh(true);
+      } finally {
+        ui.importBackupButton.disabled = false;
+      }
+    }
+
     ui.refreshButton.addEventListener("click", () => refresh(true));
+    ui.exportBackupButton.addEventListener("click", exportBackup);
+    ui.importBackupButton.addEventListener("click", () => ui.backupFile.click());
+    ui.backupFile.addEventListener("change", () => {
+      importBackup(ui.backupFile.files[0])
+        .catch(showError)
+        .finally(() => { ui.backupFile.value = ""; });
+    });
     ui.search.addEventListener("input", render);
     setInterval(() => {
       if (ui.autoRefresh.checked) refresh(false);

@@ -12,9 +12,12 @@ from pathlib import Path
 from unittest.mock import patch
 
 from rapp_herdr.manager import (
+    _absolute_python_path,
     _default_brainstem_python,
+    _internal_twin_command,
     _powershell_command,
     _requirements_fingerprint,
+    load_twin_launch_payload,
     prepare_brainstem_python,
 )
 from rapp_herdr.model import RappHerdrError, load_neighborhood, resolve_topology
@@ -33,6 +36,49 @@ class RuntimePreparationTests(unittest.TestCase):
             require_all_local=True,
         )
         return topology, workspace
+
+    @unittest.skipIf(os.name == "nt", "symlinked venv launchers are POSIX-specific")
+    def test_configured_python_path_preserves_venv_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            base = root / "base-python"
+            base.write_text("", encoding="utf-8")
+            configured = root / "venv" / "bin" / "python"
+            configured.parent.mkdir(parents=True)
+            configured.symlink_to(base)
+
+            selected = _absolute_python_path(configured)
+
+            self.assertEqual(selected, configured.absolute())
+            self.assertNotEqual(selected, configured.resolve())
+
+    def test_windows_twin_launch_uses_a_short_owned_payload_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory) / "probe-workspace"
+            workspace.mkdir()
+            rappid = "rappid:@test/probe:" + "a" * 64
+
+            command = _internal_twin_command(
+                workspace=workspace,
+                python=Path(r"C:\Python\python.exe"),
+                port=7199,
+                name="Persistence Probe",
+                rappid=rappid,
+                neighborhood="Probe Neighborhood",
+                listen_host="127.0.0.1",
+                entrypoint="brainstem.py",
+                launch_nonce="launch-nonce",
+                herdr_binary=r"C:\Herdr\herdr.exe",
+                windows=True,
+            )
+
+            self.assertLess(len(command), 8_000)
+            self.assertNotIn(rappid, command)
+            payloads = list((workspace / ".rapp-herdr-launch").glob("*.json"))
+            self.assertEqual(len(payloads), 1)
+            payload = load_twin_launch_payload(payloads[0])
+            self.assertEqual(payload["rappid"], rappid)
+            self.assertEqual(payload["port"], 7199)
 
     def test_top_level_requirements_is_the_canonical_dependency_file(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -133,7 +179,7 @@ class RuntimePreparationTests(unittest.TestCase):
                 bootstrap=True,
             )
 
-            self.assertEqual(selected, python.resolve())
+            self.assertEqual(selected, python.absolute())
             command = run.call_args.args[0]
             self.assertEqual(command[1:4], ["-m", "pip", "install"])
             self.assertIn("-r", command)

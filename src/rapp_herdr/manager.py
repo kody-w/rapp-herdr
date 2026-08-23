@@ -31,6 +31,7 @@ _INDEX_REQUIREMENT = re.compile(
     r"(?:\s*,\s*(?:===|~=|==|!=|<=|>=|<|>)\s*[^,;\s]+)*)?"
     r"(?:\s*;\s*.+)?$"
 )
+_TWIN_LAUNCH_SCHEMA = "rapp-herdr-twin-launch/1.0"
 
 
 def _now() -> str:
@@ -74,6 +75,12 @@ def _default_brainstem_python(requirements_fingerprint: str) -> Path:
     if os.name == "nt":
         return environment / "Scripts" / "python.exe"
     return environment / "bin" / "python"
+
+
+def _absolute_python_path(value: str | Path) -> Path:
+    # A venv's Python is commonly a symlink. Path.resolve() follows it to the
+    # base interpreter and silently drops the venv's package boundary.
+    return Path(os.path.abspath(os.path.expanduser(str(value))))
 
 
 def _runtime_imports_work(python: Path) -> bool:
@@ -183,7 +190,7 @@ def prepare_brainstem_python(
     requirements_fingerprint = next(iter(fingerprints), "base")
     requirements = next(iter(fingerprints.values()), None)
     if configured_python:
-        python = Path(configured_python).expanduser().resolve()
+        python = _absolute_python_path(configured_python)
         if not python.is_file():
             raise RappHerdrError(
                 f"configured RAPP brainstem Python does not exist: {python}"
@@ -298,8 +305,38 @@ def _internal_twin_command(
     entrypoint: str,
     launch_nonce: str,
     herdr_binary: str,
+    windows: bool | None = None,
 ) -> str:
     source_root = Path(__file__).resolve().parents[1]
+    use_windows = os.name == "nt" if windows is None else windows
+    if use_windows:
+        payload_path = _write_twin_launch_payload(
+            workspace=workspace,
+            python=python,
+            port=port,
+            name=name,
+            rappid=rappid,
+            neighborhood=neighborhood,
+            listen_host=listen_host,
+            entrypoint=entrypoint,
+            launch_nonce=launch_nonce,
+            herdr_binary=herdr_binary,
+        )
+        arguments = [
+            sys.executable,
+            "-c",
+            (
+                "import sys; "
+                "sys.path.insert(0, sys.argv.pop(1)); "
+                "from rapp_herdr.cli import main; "
+                "raise SystemExit(main(sys.argv[1:]))"
+            ),
+            str(source_root),
+            "_twin-file",
+            "--payload-file",
+            str(payload_path),
+        ]
+        return _powershell_command(arguments)
     code = (
         "import sys; "
         "sys.path.insert(0, sys.argv.pop(1)); "
@@ -334,6 +371,93 @@ def _internal_twin_command(
         herdr_binary,
     ]
     return _shell_command(arguments)
+
+
+def _write_twin_launch_payload(
+    *,
+    workspace: Path,
+    python: Path,
+    port: int,
+    name: str,
+    rappid: str,
+    neighborhood: str,
+    listen_host: str,
+    entrypoint: str,
+    launch_nonce: str,
+    herdr_binary: str,
+) -> Path:
+    directory = workspace / ".rapp-herdr-launch"
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    target = directory / f"{launch_nonce}.json"
+    value = {
+        "schema": _TWIN_LAUNCH_SCHEMA,
+        "workspace": str(workspace),
+        "python": str(python),
+        "port": port,
+        "name": name,
+        "rappid": rappid,
+        "neighborhood": neighborhood,
+        "listen_host": listen_host,
+        "entrypoint": entrypoint,
+        "launch_nonce": launch_nonce,
+        "herdr_binary": herdr_binary,
+    }
+    descriptor = os.open(
+        target,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+        0o600,
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(value, handle, separators=(",", ":"))
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+    except BaseException:
+        target.unlink(missing_ok=True)
+        raise
+    return target
+
+
+def load_twin_launch_payload(path: str | Path) -> dict[str, Any]:
+    payload_path = Path(path).expanduser().absolute()
+    try:
+        if payload_path.stat().st_size > 65_536:
+            raise RappHerdrError("Twin launch payload exceeds the safety limit")
+        value = json.loads(payload_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise RappHerdrError(f"invalid Twin launch payload {payload_path}: {exc}") from exc
+    if not isinstance(value, dict) or value.get("schema") != _TWIN_LAUNCH_SCHEMA:
+        raise RappHerdrError("Twin launch payload has an invalid schema")
+    text_fields = (
+        "workspace",
+        "python",
+        "name",
+        "rappid",
+        "neighborhood",
+        "listen_host",
+        "entrypoint",
+        "launch_nonce",
+        "herdr_binary",
+    )
+    for field in text_fields:
+        raw = value.get(field)
+        if (
+            not isinstance(raw, str)
+            or not raw
+            or "\0" in raw
+            or "\r" in raw
+            or "\n" in raw
+        ):
+            raise RappHerdrError(f"Twin launch payload field {field!r} is invalid")
+    port = value.get("port")
+    if not isinstance(port, int) or isinstance(port, bool) or not 1 <= port <= 65535:
+        raise RappHerdrError("Twin launch payload port is invalid")
+    workspace = Path(value["workspace"]).expanduser().absolute()
+    expected_parent = workspace / ".rapp-herdr-launch"
+    if payload_path.parent != expected_parent:
+        raise RappHerdrError("Twin launch payload is outside its workspace")
+    return value
 
 
 class NeighborhoodManager:
@@ -413,7 +537,7 @@ class NeighborhoodManager:
             "launch": {
                 "python": str(python),
                 "configured_python": (
-                    str(Path(configured_python).expanduser().resolve())
+                    str(_absolute_python_path(configured_python))
                     if configured_python
                     else None
                 ),
@@ -472,7 +596,7 @@ class NeighborhoodManager:
             if isinstance(member, dict)
         ]
         configured = (
-            str(Path(brainstem_python).expanduser().resolve())
+            str(_absolute_python_path(brainstem_python))
             if brainstem_python
             else None
         )
@@ -603,9 +727,9 @@ class NeighborhoodManager:
                             )
                         continue
                     if python is None:
-                        python = Path(
+                        python = _absolute_python_path(
                             str(launch.get("python", ""))
-                        ).expanduser().resolve()
+                        )
                         if not python.is_file():
                             raise RappHerdrError(
                                 f"managed Twin interpreter is unavailable: {python}"

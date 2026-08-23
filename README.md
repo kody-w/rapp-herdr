@@ -121,6 +121,24 @@ rapp-herdr estate status ~/.config/rapp-herdr/estate.json
 rapp-herdr estate down ~/.config/rapp-herdr/estate.json
 ```
 
+Seed one isolated persistence-test Twin on every enabled device, then mark and
+verify its local memory around a normal estate runtime restart:
+
+```bash
+rapp-herdr estate probe seed ~/.config/rapp-herdr/estate.json
+rapp-herdr estate probe start ~/.config/rapp-herdr/estate.json
+rapp-herdr estate probe mark ~/.config/rapp-herdr/estate.json
+rapp-herdr estate probe restart ~/.config/rapp-herdr/estate.json
+rapp-herdr estate probe verify ~/.config/rapp-herdr/estate.json
+```
+
+Probe workspaces use deterministic, device-specific RAPPIDs and live under the
+device's first configured Twin inventory root. Existing Twins are never moved,
+copied, or overwritten. The seed command also retains the previous estate
+manifest as a local rollback backup before adding the managed probe
+neighborhood. Probes reuse each device's installed Brainstem interpreter in
+verification-only mode; they never install packages into it.
+
 Launch the live, read-only topology dashboard:
 
 ```bash
@@ -132,6 +150,12 @@ reachability, Herdr sessions, runtime neighborhoods, estate workspaces,
 neighborhood workers, assigned/unassigned Twins, and separately classified
 non-Twin organisms. It is loopback-only, validates the browser authority, and
 requires the unguessable token printed in its per-launch URL.
+
+Use **Export backup** to download a checksummed local JSON backup of the
+authoritative estate manifest. **Import backup** accepts that envelope or a
+plain `rapp-herdr-estate/1.0` manifest, validates it before replacement, writes
+it atomically, and retains the previous manifest beside `estate.json` as a
+mode-`0600` rollback copy.
 
 The estate projection has two complementary layers:
 

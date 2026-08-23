@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import runpy
 import sys
@@ -9,6 +10,11 @@ from pathlib import Path
 
 from .lifecycle import HerdrReporter, TwinLifecycle, wait_for_health
 from .model import RappHerdrError
+from .probe import (
+    PROBE_NEIGHBORHOOD_NAME,
+    PROBE_SCHEMA,
+    probe_rappid,
+)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -25,6 +31,42 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _entrypoint(workspace: Path, raw: str) -> Path:
+    relative = Path(raw)
+    if relative.is_absolute():
+        raise RappHerdrError("Twin entrypoint must be relative to its workspace")
+    entrypoint = (workspace / relative).resolve()
+    if entrypoint != workspace and workspace not in entrypoint.parents:
+        raise RappHerdrError("Twin entrypoint escapes its workspace")
+    if entrypoint.suffix != ".py" or not entrypoint.is_file():
+        raise RappHerdrError(f"Twin entrypoint is not a Python file: {entrypoint}")
+    return entrypoint
+
+
+def _is_persistence_probe(
+    workspace: Path,
+    *,
+    rappid: str,
+    neighborhood: str,
+    entrypoint: str,
+) -> bool:
+    marker = workspace / ".rapp-herdr-probe.json"
+    try:
+        value = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return False
+    device_id = value.get("device_id") if isinstance(value, dict) else None
+    return (
+        isinstance(device_id, str)
+        and value.get("schema") == PROBE_SCHEMA
+        and value.get("rappid") == rappid
+        and rappid == probe_rappid(device_id)
+        and workspace.name == f"rapp-herdr-persistence-probe-{device_id}"
+        and neighborhood == PROBE_NEIGHBORHOOD_NAME
+        and entrypoint == "brainstem.py"
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     workspace = Path(args.workspace).expanduser().resolve()
@@ -36,6 +78,8 @@ def main(argv: list[str] | None = None) -> int:
     os.environ["SOUL_PATH"] = str(workspace / "soul.md")
     os.environ["AGENTS_PATH"] = str(workspace / "agents")
     os.environ["PYTHONUTF8"] = "1"
+    os.environ["RAPP_HERDR_LAUNCH_NONCE"] = args.launch_nonce
+    os.environ["RAPP_HERDR_LISTEN_HOST"] = args.listen_host
 
     reporter = HerdrReporter(
         workspace=workspace,
@@ -46,6 +90,39 @@ def main(argv: list[str] | None = None) -> int:
         binary=args.herdr,
     )
     reporter.start(strict=True)
+
+    entrypoint = _entrypoint(workspace, args.entrypoint)
+    if _is_persistence_probe(
+        workspace,
+        rappid=args.rappid,
+        neighborhood=args.neighborhood,
+        entrypoint=args.entrypoint,
+    ):
+        lifecycle = TwinLifecycle(reporter, args.launch_nonce)
+        watcher = threading.Thread(
+            target=wait_for_health,
+            kwargs={
+                "lifecycle": lifecycle,
+                "port": args.port,
+                "launch_nonce": args.launch_nonce,
+            },
+            name=f"rapp-herdr-health-{args.port}",
+            daemon=True,
+        )
+        watcher.start()
+        try:
+            runpy.run_path(str(entrypoint), run_name="__main__")
+            return 0
+        except KeyboardInterrupt:
+            return 130
+        except BaseException as fallback_exc:
+            reporter.state(
+                "blocked",
+                f"Twin brainstem exited: {type(fallback_exc).__name__}",
+            )
+            raise
+        finally:
+            reporter.release()
 
     import flask
 
@@ -82,14 +159,6 @@ def main(argv: list[str] | None = None) -> int:
         sys.path.insert(0, str(utils))
     if str(workspace) not in sys.path:
         sys.path.insert(0, str(workspace))
-    relative_entrypoint = Path(args.entrypoint)
-    if relative_entrypoint.is_absolute():
-        raise RappHerdrError("Twin entrypoint must be relative to its workspace")
-    entrypoint = (workspace / relative_entrypoint).resolve()
-    if entrypoint != workspace and workspace not in entrypoint.parents:
-        raise RappHerdrError("Twin entrypoint escapes its workspace")
-    if entrypoint.suffix != ".py" or not entrypoint.is_file():
-        raise RappHerdrError(f"Twin entrypoint is not a Python file: {entrypoint}")
     try:
         runpy.run_path(str(entrypoint), run_name="__main__")
         return 0

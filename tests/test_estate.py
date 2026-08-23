@@ -17,6 +17,7 @@ from rapp_herdr.estate import (
     run_estate_device,
 )
 from rapp_herdr.model import RappHerdrError
+from rapp_herdr.probe import probe_rappid
 
 from tests.helpers import write_json
 
@@ -120,6 +121,104 @@ class EstateTests(unittest.TestCase):
             self.assertNotIn("~/.rapp", encoded)
             self.assertEqual(decoded, device.payload())
 
+    def test_probe_observation_uses_the_receipt_allocated_port(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            estate = load_estate(create_estate(Path(directory) / "estate.json"))
+            manager = EstateManager(estate)
+            device = estate.devices[0]
+            runtime = {
+                "ok": True,
+                "reachable": True,
+                "neighborhoods": [
+                    {
+                        "ok": True,
+                        "result": {
+                            "managed": True,
+                            "state": "running",
+                            "members": [
+                                {
+                                    "port": 7203,
+                                    "rappid": probe_rappid(device.id),
+                                    "managed": True,
+                                    "live": True,
+                                    "healthy": True,
+                                }
+                            ],
+                        },
+                    }
+                ],
+            }
+            observed = {"ok": True, "device": device.id, "port": 7203}
+
+            with patch.object(
+                manager,
+                "_run_local",
+                return_value=runtime,
+            ), patch.object(
+                manager,
+                "_run_local_probe",
+                return_value=observed,
+            ) as probe:
+                result = manager._run_probe_observation(
+                    device,
+                    "verify",
+                    base_port=7199,
+                    message=None,
+                )
+
+            self.assertEqual(result, observed)
+            self.assertEqual(probe.call_args.kwargs["base_port"], 7203)
+
+    def test_probe_observation_rejects_diverged_runtime_ownership(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            estate = load_estate(create_estate(Path(directory) / "estate.json"))
+            manager = EstateManager(estate)
+            device = estate.devices[0]
+            runtime = {
+                "ok": False,
+                "reachable": True,
+                "neighborhoods": [
+                    {
+                        "ok": False,
+                        "result": {
+                            "managed": False,
+                            "state": "diverged",
+                            "members": [{"port": 7203, "rappid": "wrong"}],
+                        },
+                    }
+                ],
+            }
+
+            with patch.object(
+                manager,
+                "_run_local",
+                return_value=runtime,
+            ), patch.object(manager, "_run_local_probe") as probe:
+                result = manager._run_probe_observation(
+                    device,
+                    "verify",
+                    base_port=7199,
+                    message=None,
+                )
+
+            self.assertFalse(result["ok"])
+            self.assertIn("not running", result["error"])
+            probe.assert_not_called()
+
+    def test_probe_verification_cannot_pass_with_only_disabled_devices(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = create_estate(Path(directory) / "estate.json")
+            value = json.loads(path.read_text())
+            for device in value["devices"]:
+                device["enabled"] = False
+            write_json(path, value)
+            manager = EstateManager(load_estate(path))
+
+            result = manager.probe("verify")
+
+            self.assertFalse(result["ok"])
+            self.assertTrue(all(device["skipped"] for device in result["devices"]))
+
     def test_unsafe_ssh_alias_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = create_estate(Path(directory) / "estate.json")
@@ -169,6 +268,32 @@ class EstateTests(unittest.TestCase):
             self.assertFalse(result["ok"])
             self.assertTrue(result["reachable"])
             self.assertEqual(result["error"], "diverged")
+
+    @patch("rapp_herdr.estate.subprocess.run")
+    def test_remote_probe_reads_structured_cli_error_from_stderr(self, run) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            estate = load_estate(create_estate(Path(directory) / "estate.json"))
+            device = estate.devices[1]
+            run.return_value = subprocess.CompletedProcess(
+                [],
+                1,
+                stdout="",
+                stderr='{"ok":false,"error":"not restarted"}',
+            )
+
+            result = EstateManager(
+                estate,
+                ssh_binary="/usr/bin/ssh",
+            )._run_remote_probe(
+                device,
+                "verify",
+                base_port=7199,
+                message=None,
+            )
+
+            self.assertFalse(result["ok"])
+            self.assertTrue(result["reachable"])
+            self.assertEqual(result["error"], "not restarted")
 
     @patch("rapp_herdr.estate._start_herdr_session")
     def test_device_with_no_neighborhoods_still_starts_session(self, start) -> None:

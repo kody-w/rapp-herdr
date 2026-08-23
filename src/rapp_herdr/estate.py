@@ -9,7 +9,7 @@ import shutil
 import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +17,15 @@ from .catalog import CatalogManager, discover_catalogs
 from .herdr import HerdrClient
 from .manager import NeighborhoodManager, _powershell_command
 from .model import RappHerdrError, load_neighborhood, resolve_topology
+from .probe import (
+    PROBE_NEIGHBORHOOD_MANIFEST,
+    add_probe_neighborhoods,
+    encode_probe_payload,
+    probe_brainstem_python,
+    probe_payload,
+    probe_rappid,
+    run_probe_device,
+)
 from .receipts import ReceiptStore
 
 ESTATE_SCHEMA = "rapp-herdr-estate/1.0"
@@ -621,14 +630,15 @@ class EstateManager:
             timeout=self.timeout,
             check=False,
         )
+        output = result.stdout.strip() or result.stderr.strip()
         try:
-            value = json.loads(result.stdout)
+            value = json.loads(output)
         except json.JSONDecodeError:
             return {
                 "ok": False,
                 "device": device.id,
                 "reachable": result.returncode != 255,
-                "error": f"remote returned non-JSON output: {result.stdout.strip()}",
+                "error": f"remote returned non-JSON output: {output}",
             }
         if not isinstance(value, dict):
             return {
@@ -646,6 +656,214 @@ class EstateManager:
                 or f"remote exited {result.returncode}"
             )
         return value
+
+    def _run_remote_probe(
+        self,
+        device: EstateDevice,
+        action: str,
+        *,
+        base_port: int,
+        message: str | None,
+    ) -> dict[str, Any]:
+        if not self.ssh_binary:
+            return {
+                "ok": False,
+                "device": device.id,
+                "reachable": False,
+                "error": "ssh is not installed",
+            }
+        payload = probe_payload(
+            device.id,
+            device.inventory_roots[0],
+            base_port=base_port,
+            message=message,
+        )
+        arguments = [
+            device.rapp_herdr_bin,
+            "_probe-device",
+            action,
+            "--payload",
+            encode_probe_payload(payload),
+        ]
+        command = (
+            _powershell_command(arguments)
+            if device.os == "windows"
+            else shlex.join(arguments)
+        )
+        result = subprocess.run(
+            [
+                self.ssh_binary,
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=8",
+                device.ssh or "",
+                command,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=self.timeout,
+            check=False,
+        )
+        output = result.stdout.strip() or result.stderr.strip()
+        try:
+            value = json.loads(output)
+        except json.JSONDecodeError:
+            return {
+                "ok": False,
+                "device": device.id,
+                "reachable": result.returncode != 255,
+                "error": f"remote returned non-JSON output: {output}",
+            }
+        if not isinstance(value, dict):
+            return {
+                "ok": False,
+                "device": device.id,
+                "reachable": True,
+                "error": "remote returned an invalid probe result",
+            }
+        value["reachable"] = True
+        return value
+
+    @staticmethod
+    def _run_local_probe(
+        device: EstateDevice,
+        action: str,
+        *,
+        base_port: int,
+        message: str | None,
+    ) -> dict[str, Any]:
+        value = run_probe_device(
+            action,
+            probe_payload(
+                device.id,
+                device.inventory_roots[0],
+                base_port=base_port,
+                message=message,
+            ),
+        )
+        value["reachable"] = True
+        return value
+
+    @staticmethod
+    def _probe_runtime_device(
+        device: EstateDevice,
+        *,
+        base_port: int,
+    ) -> EstateDevice:
+        return replace(
+            device,
+            catalog_roots=(),
+            neighborhoods=(
+                EstateNeighborhood(
+                    manifest=PROBE_NEIGHBORHOOD_MANIFEST,
+                    members=None,
+                    estate_roots=(device.inventory_roots[0],),
+                    base_port=base_port,
+                    brainstem_python=probe_brainstem_python(device.os),
+                    bootstrap=False,
+                    listen_host="127.0.0.1",
+                    entrypoint="brainstem.py",
+                ),
+            ),
+        )
+
+    def _run_probe_runtime(
+        self,
+        device: EstateDevice,
+        action: str,
+        *,
+        base_port: int,
+    ) -> dict[str, Any]:
+        probe_device = self._probe_runtime_device(
+            device,
+            base_port=base_port,
+        )
+        runner = (
+            self._run_local
+            if device.transport == "local"
+            else self._run_remote
+        )
+        if action != "restart":
+            return runner(
+                probe_device,
+                "up" if action == "start" else "down",
+            )
+        stopped = runner(probe_device, "down")
+        if not stopped.get("ok"):
+            return {
+                **stopped,
+                "restart": {"stopped": stopped, "started": None},
+            }
+        started = runner(probe_device, "up")
+        return {
+            **started,
+            "restart": {"stopped": stopped, "started": started},
+        }
+
+    def _run_probe_observation(
+        self,
+        device: EstateDevice,
+        action: str,
+        *,
+        base_port: int,
+        message: str | None,
+    ) -> dict[str, Any]:
+        probe_device = self._probe_runtime_device(
+            device,
+            base_port=base_port,
+        )
+        runtime_runner = (
+            self._run_local
+            if device.transport == "local"
+            else self._run_remote
+        )
+        runtime = runtime_runner(probe_device, "status")
+        neighborhoods = runtime.get("neighborhoods")
+        member = None
+        if (
+            runtime.get("ok") is True
+            and isinstance(neighborhoods, list)
+            and len(neighborhoods) == 1
+            and neighborhoods[0].get("ok") is True
+        ):
+            result = neighborhoods[0].get("result")
+            members = result.get("members") if isinstance(result, dict) else None
+            if (
+                isinstance(result, dict)
+                and result.get("managed") is True
+                and result.get("state") == "running"
+                and isinstance(members, list)
+                and len(members) == 1
+            ):
+                candidate = members[0]
+                if (
+                    isinstance(candidate, dict)
+                    and candidate.get("rappid") == probe_rappid(device.id)
+                    and candidate.get("managed") is True
+                    and candidate.get("live") is True
+                    and candidate.get("healthy") is True
+                ):
+                    member = candidate
+        actual_port = member.get("port") if isinstance(member, dict) else None
+        if not isinstance(actual_port, int):
+            return {
+                "ok": False,
+                "device": device.id,
+                "reachable": bool(runtime.get("reachable")),
+                "error": "persistence probe runtime is not running",
+            }
+        observer = (
+            self._run_local_probe
+            if device.transport == "local"
+            else self._run_remote_probe
+        )
+        return observer(
+            device,
+            action,
+            base_port=actual_port,
+            message=message,
+        )
 
     @staticmethod
     def _run_local(device: EstateDevice, action: str) -> dict[str, Any]:
@@ -697,5 +915,104 @@ class EstateManager:
             "schema": ESTATE_SCHEMA,
             "estate": self.estate.name,
             "action": action,
+            "devices": results,
+        }
+
+    def probe(self, action: str, *, base_port: int = 7199) -> dict[str, Any]:
+        if action not in {
+            "seed",
+            "start",
+            "stop",
+            "restart",
+            "mark",
+            "verify",
+        }:
+            raise RappHerdrError(f"unsupported persistence probe action: {action}")
+        if not 1 <= base_port <= 65535:
+            raise RappHerdrError("probe base port must be from 1 to 65535")
+        message = (
+            "persistence-check-"
+            + time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+            if action == "mark"
+            else None
+        )
+        results_by_id: dict[str, dict[str, Any]] = {}
+        enabled = [device for device in self.estate.devices if device.enabled]
+
+        def run_device(device: EstateDevice) -> dict[str, Any]:
+            if action == "seed":
+                seeder = (
+                    self._run_local_probe
+                    if device.transport == "local"
+                    else self._run_remote_probe
+                )
+                return seeder(
+                    device,
+                    action,
+                    base_port=base_port,
+                    message=None,
+                )
+            if action in {"mark", "verify"}:
+                return self._run_probe_observation(
+                    device,
+                    action,
+                    base_port=base_port,
+                    message=message,
+                )
+            return self._run_probe_runtime(
+                device,
+                action,
+                base_port=base_port,
+            )
+
+        with ThreadPoolExecutor(max_workers=max(1, min(8, len(enabled)))) as executor:
+            futures = {
+                executor.submit(run_device, device): device
+                for device in enabled
+            }
+            for future in as_completed(futures):
+                device = futures[future]
+                try:
+                    results_by_id[device.id] = future.result()
+                except (OSError, subprocess.TimeoutExpired, RappHerdrError) as exc:
+                    results_by_id[device.id] = {
+                        "ok": False,
+                        "device": device.id,
+                        "reachable": False,
+                        "error": str(exc),
+                    }
+        results = [
+            (
+                {
+                    "ok": True,
+                    "device": device.id,
+                    "reachable": False,
+                    "skipped": True,
+                    "note": device.note,
+                }
+                if not device.enabled
+                else results_by_id[device.id]
+            )
+            for device in self.estate.devices
+        ]
+        manifest_update = None
+        if action == "seed":
+            seeded_ids = {
+                str(result["device"])
+                for result in results
+                if result.get("ok") and not result.get("skipped")
+            }
+            manifest_update = add_probe_neighborhoods(
+                self.estate.manifest_path,
+                seeded_ids,
+                base_port=base_port,
+            )
+        return {
+            "ok": bool(enabled) and all(result.get("ok") for result in results),
+            "schema": ESTATE_SCHEMA,
+            "estate": self.estate.name,
+            "action": f"probe-{action}",
+            "message": message,
+            "manifest_update": manifest_update,
             "devices": results,
         }

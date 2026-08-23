@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import json
+import tempfile
 import threading
 import unittest
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from urllib.error import HTTPError
 
 from rapp_herdr.model import RappHerdrError
-from rapp_herdr.ui import _html_path, make_handler, run_ui
+from rapp_herdr.ui import EstateStatusCache, _html_path, make_handler, run_ui
+from tests.test_estate import create_estate
 
 
 class FakeCache:
@@ -31,6 +34,8 @@ class UiTests(unittest.TestCase):
         self.assertIn("--cp-accent: #b11f4b;", html)
         self.assertIn('font-family: "Segoe UI", Aptos, Calibri', html)
         self.assertNotIn("<script src=", html)
+        self.assertIn('id="exportBackupButton"', html)
+        self.assertIn('id="importBackupButton"', html)
 
     def test_ui_serves_html_and_live_status(self) -> None:
         token = "test-token"
@@ -100,6 +105,62 @@ class UiTests(unittest.TestCase):
             server.shutdown()
             server.server_close()
             thread.join(timeout=2)
+
+    def test_ui_exports_and_imports_local_backup(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            manifest = create_estate(Path(directory) / "estate.json")
+            token = "test-token"
+            server = ThreadingHTTPServer(
+                ("127.0.0.1", 0),
+                BaseHTTPRequestHandler,
+            )
+            host = f"127.0.0.1:{server.server_port}"
+            server.RequestHandlerClass = make_handler(
+                EstateStatusCache(manifest),
+                token=token,
+                allowed_hosts={host},
+            )
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                base = f"http://127.0.0.1:{server.server_port}"
+                export_request = urllib.request.Request(
+                    base + "/api/backup",
+                    headers={"X-RAPP-Herdr-Token": token},
+                )
+                with urllib.request.urlopen(export_request, timeout=3) as response:
+                    backup = json.loads(response.read())
+                    self.assertEqual(
+                        backup["schema"],
+                        "rapp-herdr-estate-backup/1.0",
+                    )
+                    self.assertIn(
+                        "attachment;",
+                        response.headers["Content-Disposition"],
+                    )
+
+                backup["estate"]["name"] = "Restored Through UI"
+                import_request = urllib.request.Request(
+                    base + "/api/backup/import",
+                    data=json.dumps(backup["estate"]).encode(),
+                    method="POST",
+                    headers={
+                        "Content-Type": "application/json",
+                        "X-RAPP-Herdr-Token": token,
+                    },
+                )
+                with urllib.request.urlopen(import_request, timeout=3) as response:
+                    result = json.loads(response.read())
+                    self.assertTrue(result["ok"])
+                    self.assertTrue(Path(result["previous_manifest"]).is_file())
+                self.assertEqual(
+                    json.loads(manifest.read_text())["name"],
+                    "Restored Through UI",
+                )
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=2)
 
     def test_ui_refuses_lan_binding_without_explicit_opt_in(self) -> None:
         with self.assertRaisesRegex(RappHerdrError, "loopback"):
