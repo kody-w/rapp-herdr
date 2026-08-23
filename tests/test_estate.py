@@ -38,6 +38,7 @@ def create_estate(path: Path) -> Path:
                     "receipt_root": None,
                     "inventory_roots": ["~/.rapp/twins"],
                     "catalog_roots": [],
+                    "audit_roots": [],
                     "neighborhoods": [],
                 },
                 {
@@ -51,6 +52,7 @@ def create_estate(path: Path) -> Path:
                     "receipt_root": None,
                     "inventory_roots": ["~/.rapp/twins"],
                     "catalog_roots": [],
+                    "audit_roots": [],
                     "neighborhoods": [
                         {
                             "manifest": "~/.rapp/neighborhoods/one/neighborhood.json",
@@ -92,6 +94,31 @@ class EstateTests(unittest.TestCase):
                 {"state": "down", "managed": False}
             )
         )
+
+    @patch("rapp_herdr.estate.audit_machine", side_effect=RappHerdrError("audit broke"))
+    @patch("rapp_herdr.estate._start_herdr_session")
+    def test_explicit_audit_fails_without_invalidating_lifecycle_actions(
+        self, start, _audit
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            start.return_value = object()
+            payload = {
+                "id": "local",
+                "session": "rapp-estate",
+                "herdr_bin": "/opt/herdr",
+                "inventory_roots": [directory],
+                "catalog_roots": [],
+                "audit_roots": [],
+                "neighborhoods": [],
+            }
+
+            audit = run_estate_device("audit", payload)
+            up = run_estate_device("up", payload)
+
+            self.assertFalse(audit["ok"])
+            self.assertFalse(audit["audit"]["ok"])
+            self.assertTrue(up["ok"])
+            self.assertFalse(up["audit"]["ok"])
 
     def test_estate_plan_preserves_device_and_neighborhood_topology(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

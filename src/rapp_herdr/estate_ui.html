@@ -135,6 +135,7 @@
     }
     .button.primary:hover { background: var(--cp-accent-hover); }
     .button:disabled { cursor: wait; opacity: 0.65; }
+    .file-input { display: none; }
     .live {
       display: inline-flex;
       align-items: center;
@@ -159,7 +160,7 @@
     .dot.bad { background: var(--cp-danger); }
     .metrics {
       display: grid;
-      grid-template-columns: repeat(6, minmax(120px, 1fr));
+      grid-template-columns: repeat(4, minmax(120px, 1fr));
       gap: 12px;
       margin-bottom: 16px;
     }
@@ -211,6 +212,84 @@
       font-family: Consolas, "Courier New", Courier, monospace;
       font-size: 12px;
     }
+    .select {
+      border: 1px solid var(--cp-border);
+      border-radius: 0.625rem;
+      padding: 9px 12px;
+      background: var(--cp-surface);
+      color: var(--cp-text);
+    }
+    .global {
+      margin-bottom: 16px;
+      padding: 16px;
+      border-radius: 16px;
+    }
+    .global-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      gap: 16px;
+      margin-bottom: 12px;
+    }
+    .global-head h2 { margin: 0; font-size: 18px; }
+    .global-head span { color: var(--cp-text-muted); font-size: 12px; }
+    .global-section + .global-section { margin-top: 16px; }
+    .global-section h3 {
+      margin: 0 0 8px;
+      color: var(--cp-text-muted);
+      font-size: 12px;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+    }
+    .global-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 8px;
+    }
+    .entity {
+      min-height: 94px;
+      padding: 12px;
+      border: 1px solid var(--cp-border);
+      border-radius: 0.625rem;
+      background: var(--cp-surface-soft);
+      cursor: pointer;
+    }
+    .entity:hover { border-color: var(--cp-border-strong); }
+    .entity.active {
+      border-color: var(--cp-accent);
+      background: var(--cp-accent-soft);
+    }
+    .entity-kind {
+      color: var(--cp-accent);
+      font-size: 10px;
+      font-weight: 750;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+    .entity-title {
+      margin: 5px 0 3px;
+      overflow: hidden;
+      font-size: 13px;
+      font-weight: 700;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .entity-subtitle {
+      overflow: hidden;
+      color: var(--cp-text-muted);
+      font-family: Consolas, "Courier New", Courier, monospace;
+      font-size: 10px;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .entity-footer {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      margin-top: 8px;
+      color: var(--cp-text-muted);
+      font-size: 10px;
+    }
     .grid {
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -219,6 +298,10 @@
     .device {
       border-radius: 16px;
       overflow: hidden;
+    }
+    .device.active {
+      border-color: var(--cp-accent);
+      box-shadow: 0 0 0 2px var(--cp-accent-soft);
     }
     .device-head {
       display: flex;
@@ -386,6 +469,7 @@
       .toolbar { align-items: stretch; flex-direction: column; }
       .timestamp { margin-left: 0; }
       .command-grid { grid-template-columns: 1fr; }
+      .global-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     }
   </style>
 </head>
@@ -405,6 +489,15 @@
           <span class="dot" id="liveDot"></span>
           <span id="liveText">Connecting</span>
         </div>
+        <button class="button" id="exportBackupButton" type="button">Export backup</button>
+        <button class="button" id="importBackupButton" type="button">Import backup</button>
+        <input
+          class="file-input"
+          id="backupFile"
+          type="file"
+          accept="application/json,.json"
+          aria-label="Choose an estate backup to import"
+        />
         <button class="button primary" id="refreshButton" type="button">Refresh shape</button>
       </div>
     </header>
@@ -417,10 +510,38 @@
         <input id="autoRefresh" type="checkbox" checked />
         Auto-refresh
       </label>
+      <label class="live">
+        <input id="followActive" type="checkbox" checked />
+        Follow active
+      </label>
+      <select class="select" id="elementFilter" aria-label="Element type">
+        <option value="all">All elements</option>
+        <option value="device">Devices</option>
+        <option value="runtime-neighborhood">Runtime neighborhoods</option>
+        <option value="catalog-neighborhood">Catalog neighborhoods</option>
+        <option value="twin">Twins</option>
+        <option value="organism">Other organisms</option>
+        <option value="asset">Audit assets</option>
+        <option value="service">Services</option>
+        <option value="job">Scheduled jobs</option>
+      </select>
+      <select class="select" id="groupBy" aria-label="Group elements">
+        <option value="type">Group by type</option>
+        <option value="device">Group by device</option>
+        <option value="compliance">Group by compliance</option>
+        <option value="status">Group by status</option>
+      </select>
       <span class="timestamp" id="timestamp">Not observed yet</span>
     </section>
 
     <div class="error" id="error" hidden></div>
+    <section class="panel global" aria-label="Global estate index">
+      <div class="global-head">
+        <h2>Global estate index</h2>
+        <span id="globalSummary">Waiting for estate observation</span>
+      </div>
+      <div id="globalIndex"></div>
+    </section>
     <section class="grid" id="devices" aria-live="polite"></section>
 
     <section class="panel commands">
@@ -447,10 +568,19 @@
       error: document.getElementById("error"),
       search: document.getElementById("search"),
       autoRefresh: document.getElementById("autoRefresh"),
+      followActive: document.getElementById("followActive"),
+      exportBackupButton: document.getElementById("exportBackupButton"),
+      importBackupButton: document.getElementById("importBackupButton"),
+      backupFile: document.getElementById("backupFile"),
+      elementFilter: document.getElementById("elementFilter"),
+      groupBy: document.getElementById("groupBy"),
+      globalIndex: document.getElementById("globalIndex"),
+      globalSummary: document.getElementById("globalSummary"),
     };
 
     let snapshot = null;
     let loading = false;
+    let lastActiveKey = "";
     const dashboardToken = new URLSearchParams(window.location.search).get("token") || "";
 
     function node(tag, className, text) {
@@ -470,8 +600,9 @@
       return "good";
     }
 
-    function listSection(title, items, renderer) {
+    function listSection(title, items, renderer, open = false) {
       const details = node("details");
+      details.open = open;
       details.appendChild(node("summary", "", `${title} (${items.length})`));
       const list = node("div", "list");
       if (!items.length) {
@@ -518,6 +649,14 @@
         (count, device) => count + (((device.inventory || {}).unassigned) || 0),
         0
       );
+      const auditedAssets = devices.reduce(
+        (count, device) => count + (((device.audit || {}).asset_count) || 0),
+        0
+      );
+      const services = devices.reduce(
+        (count, device) => count + (((device.audit || {}).service_count) || 0),
+        0
+      );
       const values = [
         [reachable, `reachable / ${enabled.length} enabled devices`],
         [neighborhoods, "runtime neighborhoods"],
@@ -525,6 +664,8 @@
         [workers, "neighborhood workers"],
         [twins, "Twin identities"],
         [unassigned, "unassigned Twins"],
+        [auditedAssets, "audited assets"],
+        [services, "active AI services"],
       ];
       ui.metrics.replaceChildren();
       values.forEach(([value, label]) => {
@@ -535,8 +676,201 @@
       });
     }
 
+    function activeWorkers(device) {
+      const active = [];
+      (device.neighborhoods || []).forEach((item) => {
+        const result = item.result || {};
+        (result.members || []).forEach((member) => {
+          if (member.agent_status === "working" || member.agent_status === "blocked") {
+            active.push({
+              key: `${device.device}:${member.pane_id}`,
+              label: member.name || member.rappid || "Twin",
+              detail: member.pane_id || item.manifest,
+              status: member.agent_status,
+            });
+          }
+        });
+      });
+      (((device.catalogs || {}).estates) || []).forEach((estate) => {
+        if (!Array.isArray(estate.cells)) return;
+        estate.cells.forEach((cell) => {
+          if (cell.agent_status === "working" || cell.agent_status === "blocked") {
+            active.push({
+              key: `${device.device}:${cell.pane_id}`,
+              label: cell.label || cell.id || estate.estate,
+              detail: `${estate.estate} / ${cell.pane_id || ""}`,
+              status: cell.agent_status,
+            });
+          }
+        });
+      });
+      return active;
+    }
+
+    function collectEntities(data) {
+      const entities = [];
+      (data.devices || []).forEach((device) => {
+        const deviceId = device.device || "unknown";
+        entities.push({
+          kind: "device",
+          title: deviceId,
+          subtitle: device.session || device.note || "",
+          device: deviceId,
+          status: device.skipped ? "disabled" : device.ok ? "healthy" : "attention",
+          compliance: "device",
+          active: false,
+        });
+        (device.neighborhoods || []).forEach((item) => {
+          const result = item.result || {};
+          entities.push({
+            kind: "runtime-neighborhood",
+            title: (item.manifest || "").split("/").slice(-2, -1)[0] || "neighborhood",
+            subtitle: item.manifest || "",
+            device: deviceId,
+            status: result.state || (item.ok ? "known" : "error"),
+            compliance: "runtime",
+            active: (result.members || []).some(
+              (member) => member.agent_status === "working" || member.agent_status === "blocked"
+            ),
+          });
+        });
+        (((device.catalogs || {}).estates) || []).forEach((estate) => {
+          if (Array.isArray(estate.cells)) {
+            estate.cells.forEach((cell) => {
+              entities.push({
+                kind: "catalog-neighborhood",
+                title: cell.label || cell.id || estate.estate,
+                subtitle: `${estate.estate} / ${cell.pane_id || ""}`,
+                device: deviceId,
+                status: cell.agent_status || estate.state || "known",
+                compliance: "catalog",
+                active: cell.agent_status === "working" || cell.agent_status === "blocked",
+              });
+            });
+          }
+        });
+        const inventory = device.inventory || {};
+        (inventory.twins || []).forEach((twin) => {
+          entities.push({
+            kind: "twin",
+            title: twin.name || twin.rappid || "Twin",
+            subtitle: twin.rappid || twin.workspace || "",
+            device: deviceId,
+            status: twin.assigned ? "assigned" : "unassigned",
+            compliance: twin.kind || "twin",
+            active: false,
+          });
+        });
+        (inventory.other_organisms || []).forEach((organism) => {
+          entities.push({
+            kind: "organism",
+            title: organism.name || organism.rappid || "Organism",
+            subtitle: organism.rappid || organism.workspace || "",
+            device: deviceId,
+            status: organism.kind || "other",
+            compliance: organism.kind || "other",
+            active: false,
+          });
+        });
+        const audit = device.audit || {};
+        (audit.assets || []).forEach((asset) => {
+          entities.push({
+            kind: "asset",
+            title: asset.name || asset.type || "Asset",
+            subtitle: asset.path || "",
+            device: deviceId,
+            status: asset.active ? "active" : asset.runnable ? "runnable" : "recorded",
+            compliance: asset.compliance || "unknown",
+            active: Boolean(asset.active),
+          });
+        });
+        (audit.services || []).forEach((service) => {
+          entities.push({
+            kind: "service",
+            title: `${service.process || "process"} :${service.port || "?"}`,
+            subtitle: `${service.address || ""} / pid ${service.pid || "?"}`,
+            device: deviceId,
+            status: service.scope || "unknown",
+            compliance: "runtime-service",
+            active: true,
+          });
+        });
+        (audit.jobs || []).forEach((job) => {
+          entities.push({
+            kind: "job",
+            title: job.label || "Scheduled job",
+            subtitle: job.pid ? `pid ${job.pid}` : "",
+            device: deviceId,
+            status: job.state || job.status || "known",
+            compliance: "scheduled",
+            active: Boolean(job.pid) || String(job.state || "").toLowerCase() === "running",
+          });
+        });
+      });
+      return entities;
+    }
+
+    function renderGlobal(data, query) {
+      const selected = ui.elementFilter.value;
+      const groupBy = ui.groupBy.value;
+      const entities = collectEntities(data)
+        .filter((entity) => selected === "all" || entity.kind === selected)
+        .filter((entity) => {
+          if (!query) return true;
+          return JSON.stringify(entity).toLowerCase().includes(query);
+        })
+        .sort((left, right) => {
+          return String(left.title).localeCompare(String(right.title));
+        });
+      ui.globalSummary.textContent = `${entities.length} visible elements`;
+      ui.globalIndex.replaceChildren();
+      if (!entities.length) {
+        ui.globalIndex.appendChild(node("div", "empty", "No estate elements match this view."));
+        return;
+      }
+      const groups = new Map();
+      entities.forEach((entity) => {
+        const key = entity[groupBy] || "unknown";
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(entity);
+      });
+      [...groups.entries()]
+        .sort(([left], [right]) => String(left).localeCompare(String(right)))
+        .forEach(([group, values]) => {
+          const section = node("section", "global-section");
+          section.appendChild(node("h3", "", `${group} (${values.length})`));
+          const grid = node("div", "global-grid");
+          values.forEach((entity) => {
+            const card = node("article", entity.active ? "entity active" : "entity");
+            card.tabIndex = 0;
+            card.appendChild(node("div", "entity-kind", entity.kind));
+            card.appendChild(node("div", "entity-title", entity.title));
+            card.appendChild(node("div", "entity-subtitle", entity.subtitle));
+            const footer = node("div", "entity-footer");
+            footer.appendChild(node("span", "", entity.device));
+            footer.appendChild(node("span", "", entity.status));
+            card.appendChild(footer);
+            card.addEventListener("click", () => {
+              const target = [...ui.devices.querySelectorAll(".device")].find(
+                (deviceCard) => deviceCard.dataset.device === entity.device
+              );
+              if (target) target.scrollIntoView({ behavior: "smooth", block: "center" });
+            });
+            grid.appendChild(card);
+          });
+          section.appendChild(grid);
+          ui.globalIndex.appendChild(section);
+        });
+    }
+
     function renderDevice(device) {
-      const card = node("article", "device");
+      const active = activeWorkers(device);
+      const card = node("article", active.length ? "device active" : "device");
+      card.dataset.device = device.device || "unknown";
+      if (active.length) {
+        card.dataset.active = "true";
+        card.dataset.activeKey = active[0].key;
+      }
       const head = node("header", "device-head");
       const titleWrap = node("div");
       const title = node("h2", "device-title");
@@ -561,6 +895,7 @@
         )
       );
       if (device.session) badges.appendChild(badge(device.session));
+      if (active.length) badges.appendChild(badge(`${active.length} active`, "warn"));
       head.appendChild(badges);
       card.appendChild(head);
 
@@ -569,12 +904,15 @@
       const neighborhoods = device.neighborhoods || [];
       const catalogs = ((device.catalogs || {}).estates || []);
       const inventory = device.inventory || {};
+      const audit = device.audit || {};
       const shape = node("div", "shape");
       [
         [neighborhoods.length, "runtime"],
         [catalogs.length, "estates"],
         [inventory.total || 0, "Twins"],
         [inventory.unassigned || 0, "unassigned"],
+        [audit.asset_count || 0, "audit assets"],
+        [audit.service_count || 0, "services"],
       ].forEach(([value, label]) => {
         const item = node("div", "shape-item");
         item.appendChild(node("strong", "", value));
@@ -582,6 +920,19 @@
         shape.appendChild(item);
       });
       body.appendChild(shape);
+
+      if (active.length) {
+        body.appendChild(
+          listSection("Active now", active, (worker) => {
+            return row(
+              worker.label,
+              worker.detail,
+              worker.status,
+              worker.status === "blocked" ? "bad" : "warn"
+            );
+          }, true)
+        );
+      }
 
       body.appendChild(
         listSection("Runtime neighborhoods", neighborhoods, (item) => {
@@ -628,6 +979,50 @@
           );
         })
       );
+      body.appendChild(
+        listSection("Machine audit", audit.assets || [], (asset) => {
+          return row(
+            asset.name || asset.type || "Asset",
+            asset.path,
+            asset.compliance || "unknown",
+            asset.compliance === "declared-rapp1-unverified"
+              ? "good"
+              : asset.compliance === "malformed"
+              ? "bad"
+              : "warn"
+          );
+        })
+      );
+      body.appendChild(
+        listSection("Active AI services", audit.services || [], (service) => {
+          return row(
+            `${service.process || "process"} :${service.port || "?"}`,
+            `${service.address || ""} / pid ${service.pid || "?"}`,
+            service.scope || "unknown",
+            service.scope === "loopback" ? "good" : "warn"
+          );
+        })
+      );
+      body.appendChild(
+        listSection("Scheduled jobs", audit.jobs || [], (job) => {
+          return row(
+            job.label || "job",
+            job.pid ? `pid ${job.pid}` : "",
+            job.state || job.status || "known",
+            "warn"
+          );
+        })
+      );
+      body.appendChild(
+        listSection("Audit findings", audit.findings || [], (finding) => {
+          return row(
+            finding.kind || "finding",
+            finding.message,
+            finding.severity || "info",
+            finding.severity === "error" ? "bad" : "warn"
+          );
+        })
+      );
       card.appendChild(body);
       return card;
     }
@@ -640,6 +1035,7 @@
         : "Observation time unavailable";
       renderMetrics(snapshot);
       const query = ui.search.value.trim().toLowerCase();
+      renderGlobal(snapshot, query);
       const devices = (snapshot.devices || []).filter((device) => {
         if (!query) return true;
         return JSON.stringify(device).toLowerCase().includes(query);
@@ -649,6 +1045,16 @@
         ui.devices.appendChild(node("div", "panel empty", "No devices match this filter."));
       } else {
         devices.forEach((device) => ui.devices.appendChild(renderDevice(device)));
+      }
+      if (ui.followActive.checked) {
+        const active = ui.devices.querySelector("[data-active='true']");
+        const activeKey = active ? active.dataset.activeKey || "" : "";
+        if (active && activeKey && activeKey !== lastActiveKey) {
+          lastActiveKey = activeKey;
+          active.scrollIntoView({ behavior: "smooth", block: "center" });
+        } else if (!active) {
+          lastActiveKey = "";
+        }
       }
     }
 
@@ -683,8 +1089,66 @@
       }
     }
 
+    function showError(error) {
+      ui.error.hidden = false;
+      ui.error.textContent = error instanceof Error ? error.message : String(error);
+      ui.liveDot.className = "dot bad";
+      ui.liveText.textContent = "Action failed";
+    }
+
+    function exportBackup() {
+      const link = document.createElement("a");
+      link.href = `/api/backup?token=${encodeURIComponent(dashboardToken)}`;
+      link.download = "";
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      ui.liveText.textContent = "Backup exported";
+    }
+
+    async function importBackup(file) {
+      if (!file) return;
+      if (file.size > 2 * 1024 * 1024) {
+        throw new Error("Backup exceeds the 2 MB safety limit.");
+      }
+      if (!window.confirm(
+        "Replace the estate manifest with this validated backup? A timestamped rollback copy will be kept."
+      )) {
+        return;
+      }
+      ui.importBackupButton.disabled = true;
+      ui.error.hidden = true;
+      try {
+        const response = await fetch("/api/backup/import", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-RAPP-Herdr-Token": dashboardToken,
+          },
+          body: await file.text(),
+        });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
+        ui.liveDot.className = "dot good";
+        ui.liveText.textContent = "Backup imported";
+        await refresh(true);
+      } finally {
+        ui.importBackupButton.disabled = false;
+      }
+    }
+
     ui.refreshButton.addEventListener("click", () => refresh(true));
+    ui.exportBackupButton.addEventListener("click", exportBackup);
+    ui.importBackupButton.addEventListener("click", () => ui.backupFile.click());
+    ui.backupFile.addEventListener("change", () => {
+      importBackup(ui.backupFile.files[0])
+        .catch(showError)
+        .finally(() => { ui.backupFile.value = ""; });
+    });
     ui.search.addEventListener("input", render);
+    ui.followActive.addEventListener("change", render);
+    ui.elementFilter.addEventListener("change", render);
+    ui.groupBy.addEventListener("change", render);
     setInterval(() => {
       if (ui.autoRefresh.checked) refresh(false);
     }, 15000);

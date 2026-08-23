@@ -9,14 +9,23 @@ import shutil
 import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
+from .audit import audit_machine
 from .catalog import CatalogManager, discover_catalogs
 from .herdr import HerdrClient
 from .manager import NeighborhoodManager, _powershell_command
 from .model import RappHerdrError, load_neighborhood, resolve_topology
+from .probe import (
+    PROBE_NEIGHBORHOOD_MANIFEST,
+    add_probe_neighborhoods,
+    encode_probe_payload,
+    probe_brainstem_python,
+    probe_payload,
+    run_probe_device,
+)
 from .receipts import ReceiptStore
 
 ESTATE_SCHEMA = "rapp-herdr-estate/1.0"
@@ -78,6 +87,7 @@ class EstateDevice:
     receipt_root: str | None
     inventory_roots: tuple[str, ...]
     catalog_roots: tuple[str, ...]
+    audit_roots: tuple[str, ...]
     neighborhoods: tuple[EstateNeighborhood, ...]
     note: str | None
 
@@ -89,6 +99,7 @@ class EstateDevice:
             "receipt_root": self.receipt_root,
             "inventory_roots": list(self.inventory_roots),
             "catalog_roots": list(self.catalog_roots),
+            "audit_roots": list(self.audit_roots),
             "neighborhoods": [
                 neighborhood.payload() for neighborhood in self.neighborhoods
             ],
@@ -243,6 +254,10 @@ def load_estate(path: str | Path) -> Estate:
                 catalog_roots=tuple(
                     _required_text(root, f"estate.devices[{index}].catalog_roots[]")
                     for root in raw.get("catalog_roots", [])
+                ),
+                audit_roots=tuple(
+                    _required_text(root, f"estate.devices[{index}].audit_roots[]")
+                    for root in raw.get("audit_roots", [])
                 ),
                 neighborhoods=tuple(neighborhoods),
                 note=(
@@ -416,7 +431,7 @@ def _neighborhood_ownership_ok(result: dict[str, Any]) -> bool:
 
 
 def run_estate_device(action: str, payload: dict[str, Any]) -> dict[str, Any]:
-    if action not in {"up", "status", "down"}:
+    if action not in {"up", "status", "down", "audit"}:
         raise RappHerdrError(f"unsupported estate device action: {action}")
     device_id = _required_text(payload.get("id"), "device.id")
     session = _required_text(payload.get("session"), "device.session")
@@ -451,7 +466,12 @@ def run_estate_device(action: str, payload: dict[str, Any]) -> dict[str, Any]:
         )
         assigned_rappids.update(neighborhood.member_rappids)
         try:
-            if manager is None:
+            if action == "audit":
+                result = {
+                    "state": "observed",
+                    "managed": False,
+                }
+            elif manager is None:
                 result = {
                     "state": "down",
                     "managed": False,
@@ -481,7 +501,11 @@ def run_estate_device(action: str, payload: dict[str, Any]) -> dict[str, Any]:
             results.append(
                 {
                     "manifest": manifest,
-                    "ok": _neighborhood_ownership_ok(result),
+                    "ok": (
+                        True
+                        if action == "audit"
+                        else _neighborhood_ownership_ok(result)
+                    ),
                     "result": result,
                 }
             )
@@ -497,7 +521,24 @@ def run_estate_device(action: str, payload: dict[str, Any]) -> dict[str, Any]:
         str(Path(root).expanduser())
         for root in payload.get("catalog_roots", [])
     ]
-    if not catalog_roots:
+    if action == "audit":
+        catalog_result = {
+            "ok": True,
+            "estates": [
+                {
+                    "estate": catalog.id,
+                    "state": "observed",
+                    "cells": len(catalog.cells),
+                }
+                for catalog in discover_catalogs(
+                    [
+                        root for root in catalog_roots
+                        if Path(root).expanduser().is_dir()
+                    ]
+                )
+            ],
+        }
+    elif not catalog_roots:
         catalog_result = {"ok": True, "estates": []}
     elif client is None:
         catalog_result = {
@@ -515,13 +556,38 @@ def run_estate_device(action: str, payload: dict[str, Any]) -> dict[str, Any]:
     else:
         catalog_manager = CatalogManager(client, receipt_store)
         catalog_result = getattr(catalog_manager, action)(catalog_roots)
+    try:
+        audit = audit_machine(payload, assigned_rappids=assigned_rappids)
+    except Exception as exc:
+        audit = {
+            "schema": "rapp-herdr-audit/1.0",
+            "ok": False,
+            "error": str(exc),
+            "assets": [],
+            "asset_count": 0,
+            "services": [],
+            "service_count": 0,
+            "jobs": [],
+            "findings": [
+                {
+                    "severity": "error",
+                    "kind": "audit-failed",
+                    "message": str(exc),
+                }
+            ],
+        }
+    lifecycle_ok = all(result["ok"] for result in results) and bool(
+        catalog_result.get("ok")
+    )
     return {
-        "ok": all(result["ok"] for result in results)
-        and bool(catalog_result.get("ok")),
+        "ok": lifecycle_ok and (
+            bool(audit.get("ok")) if action == "audit" else True
+        ),
         "device": device_id,
         "session": session_state,
         "neighborhoods": results,
         "catalogs": catalog_result,
+        "audit": audit,
         "inventory": _inventory_twins(
             [
                 str(Path(root).expanduser())
@@ -576,6 +642,7 @@ class EstateManager:
                     "inventory_roots": list(device.inventory_roots),
                     "receipt_root": device.receipt_root,
                     "catalog_roots": list(device.catalog_roots),
+                    "audit_roots": list(device.audit_roots),
                     "neighborhoods": [
                         neighborhood.payload()
                         for neighborhood in device.neighborhoods
@@ -647,6 +714,151 @@ class EstateManager:
             )
         return value
 
+    def _run_remote_probe(
+        self,
+        device: EstateDevice,
+        action: str,
+        *,
+        base_port: int,
+        message: str | None,
+    ) -> dict[str, Any]:
+        if not self.ssh_binary:
+            return {
+                "ok": False,
+                "device": device.id,
+                "reachable": False,
+                "error": "ssh is not installed",
+            }
+        arguments = [
+            device.rapp_herdr_bin,
+            "_probe-device",
+            action,
+            "--payload",
+            encode_probe_payload(
+                probe_payload(
+                    device.id,
+                    device.inventory_roots[0],
+                    base_port=base_port,
+                    message=message,
+                )
+            ),
+        ]
+        command = (
+            _powershell_command(arguments)
+            if device.os == "windows"
+            else shlex.join(arguments)
+        )
+        result = subprocess.run(
+            [
+                self.ssh_binary,
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=8",
+                device.ssh or "",
+                command,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=self.timeout,
+            check=False,
+        )
+        try:
+            value = json.loads(result.stdout)
+        except json.JSONDecodeError:
+            return {
+                "ok": False,
+                "device": device.id,
+                "reachable": result.returncode != 255,
+                "error": f"remote returned non-JSON output: {result.stdout.strip()}",
+            }
+        if not isinstance(value, dict):
+            return {
+                "ok": False,
+                "device": device.id,
+                "reachable": True,
+                "error": "remote returned an invalid probe result",
+            }
+        value["reachable"] = True
+        return value
+
+    @staticmethod
+    def _run_local_probe(
+        device: EstateDevice,
+        action: str,
+        *,
+        base_port: int,
+        message: str | None,
+    ) -> dict[str, Any]:
+        value = run_probe_device(
+            action,
+            probe_payload(
+                device.id,
+                device.inventory_roots[0],
+                base_port=base_port,
+                message=message,
+            ),
+        )
+        value["reachable"] = True
+        return value
+
+    @staticmethod
+    def _probe_runtime_device(
+        device: EstateDevice,
+        *,
+        base_port: int,
+    ) -> EstateDevice:
+        return replace(
+            device,
+            catalog_roots=(),
+            audit_roots=(),
+            neighborhoods=(
+                EstateNeighborhood(
+                    manifest=PROBE_NEIGHBORHOOD_MANIFEST,
+                    members=None,
+                    estate_roots=(device.inventory_roots[0],),
+                    base_port=base_port,
+                    brainstem_python=probe_brainstem_python(device.os),
+                    bootstrap=False,
+                    listen_host="127.0.0.1",
+                    entrypoint="brainstem.py",
+                ),
+            ),
+        )
+
+    def _run_probe_runtime(
+        self,
+        device: EstateDevice,
+        action: str,
+        *,
+        base_port: int,
+    ) -> dict[str, Any]:
+        probe_device = self._probe_runtime_device(
+            device,
+            base_port=base_port,
+        )
+        runner = (
+            self._run_local
+            if device.transport == "local"
+            else self._run_remote
+        )
+        if action != "restart":
+            return runner(
+                probe_device,
+                "up" if action == "start" else "down",
+            )
+        stopped = runner(probe_device, "down")
+        if not stopped.get("ok"):
+            return {
+                **stopped,
+                "restart": {"stopped": stopped, "started": None},
+            }
+        started = runner(probe_device, "up")
+        return {
+            **started,
+            "restart": {"stopped": stopped, "started": started},
+        }
+
     @staticmethod
     def _run_local(device: EstateDevice, action: str) -> dict[str, Any]:
         value = run_estate_device(action, device.payload())
@@ -697,5 +909,95 @@ class EstateManager:
             "schema": ESTATE_SCHEMA,
             "estate": self.estate.name,
             "action": action,
+            "devices": results,
+        }
+
+    def probe(self, action: str, *, base_port: int = 7199) -> dict[str, Any]:
+        if action not in {
+            "seed",
+            "start",
+            "stop",
+            "restart",
+            "mark",
+            "verify",
+        }:
+            raise RappHerdrError(f"unsupported persistence probe action: {action}")
+        if not 1 <= base_port <= 65535:
+            raise RappHerdrError("probe base port must be from 1 to 65535")
+        message = (
+            "persistence-check-"
+            + time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+            if action == "mark"
+            else None
+        )
+        results_by_id: dict[str, dict[str, Any]] = {}
+        enabled = [device for device in self.estate.devices if device.enabled]
+        with ThreadPoolExecutor(max_workers=max(1, min(8, len(enabled)))) as executor:
+            futures = {
+                executor.submit(
+                    (
+                        (
+                            self._run_local_probe
+                            if device.transport == "local"
+                            else self._run_remote_probe
+                        )
+                        if action in {"seed", "mark", "verify"}
+                        else self._run_probe_runtime
+                    ),
+                    device,
+                    action,
+                    base_port=base_port,
+                    **(
+                        {"message": message}
+                        if action in {"seed", "mark", "verify"}
+                        else {}
+                    ),
+                ): device
+                for device in enabled
+            }
+            for future in as_completed(futures):
+                device = futures[future]
+                try:
+                    results_by_id[device.id] = future.result()
+                except (OSError, subprocess.TimeoutExpired, RappHerdrError) as exc:
+                    results_by_id[device.id] = {
+                        "ok": False,
+                        "device": device.id,
+                        "reachable": False,
+                        "error": str(exc),
+                    }
+        results = [
+            (
+                {
+                    "ok": True,
+                    "device": device.id,
+                    "reachable": False,
+                    "skipped": True,
+                    "note": device.note,
+                }
+                if not device.enabled
+                else results_by_id[device.id]
+            )
+            for device in self.estate.devices
+        ]
+        manifest_update = None
+        if action == "seed":
+            seeded_ids = {
+                str(result["device"])
+                for result in results
+                if result.get("ok") and not result.get("skipped")
+            }
+            manifest_update = add_probe_neighborhoods(
+                self.estate.manifest_path,
+                seeded_ids,
+                base_port=base_port,
+            )
+        return {
+            "ok": all(result.get("ok") for result in results),
+            "schema": ESTATE_SCHEMA,
+            "estate": self.estate.name,
+            "action": f"probe-{action}",
+            "message": message,
+            "manifest_update": manifest_update,
             "devices": results,
         }

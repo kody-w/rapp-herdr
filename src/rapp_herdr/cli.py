@@ -17,6 +17,7 @@ from .estate import (
 from .herdr import HerdrClient
 from .manager import NeighborhoodManager
 from .model import RappHerdrError, load_neighborhood, resolve_topology
+from .probe import decode_probe_payload, run_probe_device
 from .receipts import ReceiptStore
 from .supervisor import supervise
 from .ui import run_ui
@@ -69,10 +70,18 @@ def _parser() -> argparse.ArgumentParser:
         dest="estate_command",
         required=True,
     )
-    for action in ("plan", "up", "status", "down"):
+    for action in ("plan", "up", "status", "audit", "down"):
         action_parser = estate_commands.add_parser(action)
         action_parser.add_argument("manifest", help="Path to rapp-herdr estate JSON")
         action_parser.add_argument("--ssh", help="Path to the SSH binary")
+    estate_probe = estate_commands.add_parser("probe")
+    estate_probe.add_argument(
+        "probe_action",
+        choices=["seed", "start", "stop", "restart", "mark", "verify"],
+    )
+    estate_probe.add_argument("manifest", help="Path to rapp-herdr estate JSON")
+    estate_probe.add_argument("--base-port", type=int, default=7199)
+    estate_probe.add_argument("--ssh", help="Path to the SSH binary")
 
     doctor = commands.add_parser("doctor")
     doctor.add_argument("--session")
@@ -97,8 +106,12 @@ def _parser() -> argparse.ArgumentParser:
     twin.add_argument("--herdr", required=True)
 
     estate_device = commands.add_parser("_estate-device", help=argparse.SUPPRESS)
-    estate_device.add_argument("action", choices=["up", "status", "down"])
+    estate_device.add_argument("action", choices=["up", "status", "audit", "down"])
     estate_device.add_argument("--payload", required=True)
+
+    probe_device = commands.add_parser("_probe-device", help=argparse.SUPPRESS)
+    probe_device.add_argument("action", choices=["seed", "mark", "verify"])
+    probe_device.add_argument("--payload", required=True)
 
     cell = commands.add_parser("_cell", help=argparse.SUPPRESS)
     cell_payload = cell.add_mutually_exclusive_group(required=True)
@@ -141,6 +154,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             _print(result)
             return 0 if result.get("ok") else 1
+        if args.command == "_probe-device":
+            result = run_probe_device(
+                args.action,
+                decode_probe_payload(args.payload),
+            )
+            _print(result)
+            return 0 if result.get("ok") else 1
         if args.command == "_cell":
             payload = (
                 decode_cell_payload(args.payload)
@@ -150,8 +170,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             return run_cell(payload)
         if args.command == "estate":
             estate = load_estate(args.manifest)
-            result = EstateManager(estate, ssh_binary=args.ssh).run(
-                args.estate_command
+            manager = EstateManager(estate, ssh_binary=args.ssh)
+            result = (
+                manager.probe(
+                    args.probe_action,
+                    base_port=args.base_port,
+                )
+                if args.estate_command == "probe"
+                else manager.run(args.estate_command)
             )
             _print(result)
             return 0 if result.get("ok") else 1

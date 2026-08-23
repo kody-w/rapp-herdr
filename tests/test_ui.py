@@ -21,6 +21,12 @@ class FakeCache:
             "forced": force,
         }
 
+    def export_backup(self):
+        return {"schema": "rapp-herdr-estate-backup/1.0", "estate": {}}
+
+    def import_backup(self, value):
+        return {"ok": True, "source_schema": value.get("schema")}
+
 
 class UiTests(unittest.TestCase):
     def test_ui_contains_required_theme_contract(self) -> None:
@@ -31,6 +37,12 @@ class UiTests(unittest.TestCase):
         self.assertIn("--cp-accent: #b11f4b;", html)
         self.assertIn('font-family: "Segoe UI", Aptos, Calibri', html)
         self.assertNotIn("<script src=", html)
+        self.assertIn("Machine audit", html)
+        self.assertIn("Active AI services", html)
+        self.assertIn("Follow active", html)
+        self.assertIn("scrollIntoView", html)
+        self.assertIn("Global estate index", html)
+        self.assertIn("Group by compliance", html)
 
     def test_ui_serves_html_and_live_status(self) -> None:
         token = "test-token"
@@ -96,6 +108,45 @@ class UiTests(unittest.TestCase):
             except HTTPError as rebound:
                 self.assertEqual(rebound.code, 403)
                 rebound.close()
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+    def test_ui_exports_and_imports_authenticated_backup(self) -> None:
+        token = "test-token"
+        server = ThreadingHTTPServer(("127.0.0.1", 0), BaseHTTPRequestHandler)
+        host = f"127.0.0.1:{server.server_port}"
+        server.RequestHandlerClass = make_handler(
+            FakeCache(),
+            token=token,
+            allowed_hosts={host},
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            base = f"http://127.0.0.1:{server.server_port}"
+            request = urllib.request.Request(
+                base + "/api/backup",
+                headers={"X-RAPP-Herdr-Token": token},
+            )
+            with urllib.request.urlopen(request, timeout=3) as response:
+                value = json.loads(response.read())
+                self.assertEqual(value["schema"], "rapp-herdr-estate-backup/1.0")
+                self.assertIn("attachment", response.headers["Content-Disposition"])
+            payload = json.dumps({"schema": "rapp-herdr-estate/1.0"}).encode()
+            request = urllib.request.Request(
+                base + "/api/backup/import",
+                data=payload,
+                method="POST",
+                headers={
+                    "Content-Type": "application/json",
+                    "X-RAPP-Herdr-Token": token,
+                },
+            )
+            with urllib.request.urlopen(request, timeout=3) as response:
+                value = json.loads(response.read())
+                self.assertTrue(value["ok"])
         finally:
             server.shutdown()
             server.server_close()

@@ -16,6 +16,9 @@
       "catalog_roots": [
         "~/.rapp/estates"
       ],
+      "audit_roots": [
+        "~/.brainstem/twins"
+      ],
       "neighborhoods": [
         {
           "manifest": "~/.rapp/neighborhoods/NEIGHBORHOOD_ID/neighborhood.json",
@@ -41,6 +44,7 @@
         "~/.rapp/twins"
       ],
       "catalog_roots": [],
+      "audit_roots": [],
       "neighborhoods": []
     },
     {
@@ -56,6 +60,7 @@
         "~/.rapp/twins"
       ],
       "catalog_roots": [],
+      "audit_roots": [],
       "neighborhoods": [],
       "note": "Declared but intentionally disabled until SSH is available."
     }

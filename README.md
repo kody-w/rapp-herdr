@@ -118,6 +118,7 @@ without replacing any of them. Start from
 rapp-herdr estate plan ~/.config/rapp-herdr/estate.json
 rapp-herdr estate up ~/.config/rapp-herdr/estate.json
 rapp-herdr estate status ~/.config/rapp-herdr/estate.json
+rapp-herdr estate audit ~/.config/rapp-herdr/estate.json
 rapp-herdr estate down ~/.config/rapp-herdr/estate.json
 ```
 
@@ -130,8 +131,31 @@ rapp-herdr ui ~/.config/rapp-herdr/estate.json --open
 The dashboard refreshes from real `estate status` observations: device
 reachability, Herdr sessions, runtime neighborhoods, estate workspaces,
 neighborhood workers, assigned/unassigned Twins, and separately classified
-non-Twin organisms. It is loopback-only, validates the browser authority, and
-requires the unguessable token printed in its per-launch URL.
+non-Twin organisms. Its global index can filter devices, neighborhoods, Twins,
+assets, services, and jobs, then group them by type, device, compliance, or
+status. Follow Active automatically expands and scrolls to the currently
+working or blocked worker. It is loopback-only, validates the browser
+authority, and requires the unguessable token printed in its per-launch URL.
+
+Machine audit is read-only and allowlist-bounded. It inventories declared
+RAPP/1 candidates without claiming conformance, legacy RAPP, non-RAPP AI
+workspaces, malformed/stale records, listeners, scheduled jobs, egg metadata,
+and live-versus-persisted Herdr state. Secret-bearing paths and symlink escapes
+are omitted; traversal has global depth/path/asset limits.
+
+The UI can export a checksummed estate backup and import it only after schema
+validation, checksum verification, operator confirmation, and creation of a
+timestamped rollback copy.
+
+Persistence probes provide an opt-in survival test across every enabled device:
+
+```bash
+rapp-herdr estate probe seed ~/.config/rapp-herdr/estate.json
+rapp-herdr estate probe start ~/.config/rapp-herdr/estate.json
+rapp-herdr estate probe mark ~/.config/rapp-herdr/estate.json
+rapp-herdr estate probe restart ~/.config/rapp-herdr/estate.json
+rapp-herdr estate probe verify ~/.config/rapp-herdr/estate.json
+```
 
 The estate projection has two complementary layers:
 
