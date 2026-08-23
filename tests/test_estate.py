@@ -10,6 +10,7 @@ from unittest.mock import patch
 from rapp_herdr.estate import (
     EstateManager,
     _neighborhood_ownership_ok,
+    _windows_herdr_task_command,
     decode_device_payload,
     encode_device_payload,
     load_estate,
@@ -65,6 +66,16 @@ def create_estate(path: Path) -> Path:
 
 
 class EstateTests(unittest.TestCase):
+    def test_windows_herdr_task_command_hides_paths_from_shell_text(self) -> None:
+        command = _windows_herdr_task_command(
+            r"C:\Program Files\Herdr\herdr.exe",
+            "rapp-estate",
+        )
+
+        self.assertEqual(command[0], "powershell.exe")
+        self.assertNotIn("Program Files", " ".join(command))
+        self.assertNotIn("rapp-estate", " ".join(command))
+
     def test_diverged_neighborhood_fails_estate_ownership(self) -> None:
         self.assertFalse(
             _neighborhood_ownership_ok(

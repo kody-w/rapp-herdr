@@ -265,21 +265,33 @@ def _start_herdr_session(binary: str, session: str) -> HerdrClient:
     except RappHerdrError:
         pass
     command = [client.binary, "--session", session, "server"]
-    kwargs: dict[str, Any] = {
-        "stdin": subprocess.DEVNULL,
-        "stdout": subprocess.DEVNULL,
-        "stderr": subprocess.DEVNULL,
-    }
     if os.name == "nt":
-        kwargs["creationflags"] = (
-            subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
+        task_command = _windows_herdr_task_command(client.binary, session)
+        result = subprocess.run(
+            task_command,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
         )
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout).strip()
+            raise RappHerdrError(
+                f"cannot register persistent Herdr task: {detail}"
+            )
     else:
-        kwargs["start_new_session"] = True
-    try:
-        subprocess.Popen(command, **kwargs)
-    except OSError as exc:
-        raise RappHerdrError(f"cannot start Herdr session {session!r}: {exc}") from exc
+        try:
+            subprocess.Popen(
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        except OSError as exc:
+            raise RappHerdrError(
+                f"cannot start Herdr session {session!r}: {exc}"
+            ) from exc
     deadline = time.monotonic() + 20
     while time.monotonic() < deadline:
         try:
@@ -288,6 +300,40 @@ def _start_herdr_session(binary: str, session: str) -> HerdrClient:
         except RappHerdrError:
             time.sleep(0.1)
     raise RappHerdrError(f"Herdr session {session!r} did not become ready")
+
+
+def _windows_herdr_task_command(binary: str, session: str) -> list[str]:
+    payload = base64.b64encode(
+        json.dumps(
+            {
+                "binary": binary,
+                "session": session,
+                "task": f"RAPP-Herdr-{session}",
+            },
+            separators=(",", ":"),
+        ).encode()
+    ).decode("ascii")
+    script = (
+        "$ErrorActionPreference='Stop';"
+        f"$json=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{payload}'));"
+        "$p=$json|ConvertFrom-Json;"
+        "$args='--session '+[string]$p.session+' server';"
+        "$action=New-ScheduledTaskAction -Execute ([string]$p.binary) -Argument $args;"
+        "$trigger=New-ScheduledTaskTrigger -AtLogOn;"
+        "Register-ScheduledTask -TaskName ([string]$p.task) -Action $action "
+        "-Trigger $trigger -Description 'Persistent RAPP-Herdr estate session' "
+        "-Force|Out-Null;"
+        "Start-ScheduledTask -TaskName ([string]$p.task)"
+    )
+    encoded = base64.b64encode(script.encode("utf-16le")).decode("ascii")
+    return [
+        "powershell.exe",
+        "-NoLogo",
+        "-NoProfile",
+        "-NonInteractive",
+        "-EncodedCommand",
+        encoded,
+    ]
 
 
 def _inventory_twins(
