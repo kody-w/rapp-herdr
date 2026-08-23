@@ -16,7 +16,13 @@ from rapp_herdr.estate import (
     load_estate,
     run_estate_device,
 )
+from rapp_herdr.buddy import encode_buddy_payload
 from rapp_herdr.model import RappHerdrError
+from rapp_herdr.probe import (
+    PROBE_NEIGHBORHOOD_MANIFEST,
+    PROBE_SCHEMA,
+    probe_rappid,
+)
 
 from tests.helpers import write_json
 
@@ -182,6 +188,11 @@ class EstateTests(unittest.TestCase):
                     "bootstrap": False,
                     "listen_host": "127.0.0.1",
                     "entrypoint": "brainstem.py",
+                    "buddy": {
+                        "name": "Research Buddy",
+                        "rappid": "rappid:@local/research:" + "c" * 64,
+                        "ui": "chat",
+                    },
                 },
             }
 
@@ -228,6 +239,14 @@ class EstateTests(unittest.TestCase):
             updated = json.loads(path.read_text())
             registered = updated["devices"][0]["neighborhoods"][-1]
             self.assertEqual(registered["managed_by"], "rapp-herdr-buddy/1.0")
+            self.assertEqual(
+                registered["buddy"],
+                {
+                    "name": "Research Buddy",
+                    "rappid": created["rappid"],
+                    "ui": "chat",
+                },
+            )
             self.assertEqual(registered["base_port"], 7200)
 
     def test_failed_buddy_handshake_rolls_back_only_created_resources(self) -> None:
@@ -301,22 +320,113 @@ class EstateTests(unittest.TestCase):
             self.assertEqual(buddy_actions, ["create", "handshake", "delete"])
             self.assertEqual(json.loads(path.read_text()), original)
 
-    def test_buddy_list_and_chat_present_real_probe_target(self) -> None:
+    def test_create_buddy_rejects_manifest_unsafe_name_before_device_work(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as directory:
             estate = load_estate(create_estate(Path(directory) / "estate.json"))
+            manager = EstateManager(estate)
+
+            with patch.object(manager, "_run_local_buddy") as runner:
+                with self.assertRaisesRegex(
+                    RappHerdrError,
+                    "unsafe control character",
+                ):
+                    manager.create_buddy(
+                        device_id="local",
+                        name="Broken\nBuddy",
+                        role="Chat.",
+                    )
+
+            runner.assert_not_called()
+
+    def test_registered_manifest_reload_failure_rolls_back_buddy(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = create_estate(root / "estate.json")
+            original = json.loads(path.read_text())
+            estate = load_estate(path)
+            rappid = "rappid:@test/rollback:" + "c" * 64
+            created = {
+                "ok": True,
+                "name": "Rollback Buddy",
+                "rappid": rappid,
+                "workspace": str(root / "workspace"),
+                "manifest": str(root / "buddy" / "neighborhood.json"),
+                "port": 7200,
+                "identity_nonce": "rollback-nonce",
+                "neighborhood": {
+                    "manifest": str(root / "buddy" / "neighborhood.json"),
+                    "estate_roots": [str(root / "twins")],
+                    "base_port": 7200,
+                    "brainstem_python": "~/.brainstem/venv/bin/python",
+                    "bootstrap": False,
+                    "listen_host": "127.0.0.1",
+                    "entrypoint": "brainstem.py",
+                    "buddy": {
+                        "name": "Rollback Buddy",
+                        "rappid": rappid,
+                        "ui": "chat",
+                    },
+                },
+            }
+            actions = []
+
+            def buddy_runner(_device, action, _payload):
+                actions.append(action)
+                if action == "create":
+                    return created
+                return {"ok": True, "deleted": True}
+
+            manager = EstateManager(estate)
+            with patch.object(
+                manager,
+                "_run_local_buddy",
+                side_effect=buddy_runner,
+            ), patch(
+                "rapp_herdr.estate.load_estate",
+                side_effect=RappHerdrError("injected reload failure"),
+            ):
+                result = manager.create_buddy(
+                    device_id="local",
+                    name="Rollback Buddy",
+                    role="Chat.",
+                    ui="chat",
+                )
+
+            self.assertFalse(result["ok"])
+            self.assertTrue(result["rollback"]["ok"])
+            self.assertEqual(actions, ["create", "delete"])
+            self.assertEqual(json.loads(path.read_text()), original)
+
+    def test_buddy_list_and_chat_present_real_probe_target(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = create_estate(Path(directory) / "estate.json")
+            manifest = json.loads(path.read_text())
+            manifest["devices"][1]["neighborhoods"][0].update({
+                "manifest": PROBE_NEIGHBORHOOD_MANIFEST,
+                "managed_by": PROBE_SCHEMA,
+            })
+            write_json(path, manifest)
+            estate = load_estate(path)
             manager = EstateManager(estate, ssh_binary="/usr/bin/ssh")
             status = {
                 "ok": True,
                 "devices": [{
                     "device": "remote-mac",
                     "neighborhoods": [{
+                        "manifest": (
+                            "/Users/remote/.rapp/neighborhoods/"
+                            "rapp-herdr-persistence-probe/neighborhood.json"
+                        ),
                         "result": {
                             "members": [{
                                 "name": "Persistence Probe - remote-mac",
-                                "rappid": "rappid:@rapp/probe:" + "e" * 64,
+                                "rappid": probe_rappid("remote-mac"),
                                 "url": "http://127.0.0.1:7199",
                                 "healthy": True,
                                 "live": True,
+                                "probe_target_healthy": True,
                                 "agent_status": "idle",
                             }]
                         }
@@ -349,6 +459,71 @@ class EstateTests(unittest.TestCase):
             self.assertTrue(reply["ok"])
             self.assertEqual(reply["buddy"]["status"], "ready")
             self.assertEqual(reply["response"], "Remote Twin READY")
+
+    def test_buddy_name_cannot_impersonate_a_probe(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            estate = load_estate(create_estate(Path(directory) / "estate.json"))
+            manager = EstateManager(estate, ssh_binary="/usr/bin/ssh")
+            status = {
+                "ok": True,
+                "devices": [{
+                    "device": "remote-mac",
+                    "neighborhoods": [{
+                        "manifest": (
+                            "~/.rapp/neighborhoods/one/neighborhood.json"
+                        ),
+                        "result": {
+                            "members": [{
+                                "name": "Persistence Probe Impostor",
+                                "rappid": "rappid:@test/impostor:" + "e" * 64,
+                                "url": "http://127.0.0.1:7200",
+                                "healthy": True,
+                                "live": True,
+                                "agent_status": "done",
+                            }]
+                        },
+                    }],
+                }],
+            }
+
+            with patch.object(manager, "run", return_value=status):
+                buddy = manager.list_buddies()["buddies"][0]
+
+            self.assertEqual(buddy["name"], "Persistence Probe Impostor")
+            self.assertFalse(buddy["via_probe"])
+
+    def test_registered_stopped_buddy_remains_visible_offline(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = create_estate(Path(directory) / "estate.json")
+            manifest = json.loads(path.read_text())
+            manifest["devices"][0]["neighborhoods"].append({
+                "manifest": "/tmp/map-maker/neighborhood.json",
+                "estate_roots": ["~/.rapp/twins"],
+                "base_port": 7200,
+                "managed_by": "rapp-herdr-buddy/1.0",
+                "buddy": {
+                    "name": "Map Maker",
+                    "rappid": "rappid:@test/map-maker:" + "d" * 64,
+                    "ui": "rapplication",
+                },
+            })
+            write_json(path, manifest)
+            manager = EstateManager(load_estate(path))
+
+            with patch.object(
+                manager,
+                "run",
+                return_value={"ok": True, "devices": []},
+            ):
+                buddies = manager.list_buddies()["buddies"]
+
+            map_maker = next(
+                buddy for buddy in buddies
+                if buddy["name"] == "Map Maker"
+            )
+            self.assertEqual(map_maker["presence"], "offline")
+            self.assertEqual(map_maker["status"], "offline")
+            self.assertEqual(map_maker["ui"], "rapplication")
 
     def test_unsafe_ssh_alias_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -439,6 +614,41 @@ class EstateTests(unittest.TestCase):
             self.assertFalse(result["ok"])
             self.assertTrue(result["reachable"])
             self.assertEqual(result["error"], "diverged")
+
+    @patch("rapp_herdr.estate.subprocess.run")
+    def test_remote_buddy_payload_streams_over_stdin(self, run) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            estate = load_estate(create_estate(Path(directory) / "estate.json"))
+            run.return_value = subprocess.CompletedProcess(
+                [],
+                0,
+                stdout='{"ok":true,"device":"remote-mac"}',
+                stderr="",
+            )
+            payload = {
+                "schema": "rapp-herdr-buddy/1.0",
+                "name": "Private Buddy",
+                "role": "Private role text",
+            }
+
+            result = EstateManager(
+                estate,
+                ssh_binary="/usr/bin/ssh",
+            )._run_remote_buddy(
+                estate.devices[1],
+                "create",
+                payload,
+            )
+
+            self.assertTrue(result["ok"])
+            command = run.call_args.args[0][-1]
+            self.assertIn("--payload-stdin", command)
+            self.assertNotIn("Private Buddy", command)
+            self.assertNotIn(encode_buddy_payload(payload), command)
+            self.assertEqual(
+                run.call_args.kwargs["input"],
+                encode_buddy_payload(payload),
+            )
 
     @patch("rapp_herdr.estate._start_herdr_session")
     def test_device_with_no_neighborhoods_still_starts_session(self, start) -> None:

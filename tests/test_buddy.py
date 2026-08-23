@@ -99,12 +99,16 @@ class BuddyTests(unittest.TestCase):
 
             workspace = Path(result["workspace"])
             page = (workspace / "ui" / "index.html").read_text()
+            script = (workspace / "ui" / "ui.js").read_text()
             wrapper = (workspace / "brainstem.py").read_text()
             self.assertEqual(result["ui"], "rapplication")
             self.assertIn('href="/?ui=chat"', page)
             self.assertIn('data-rapp-action="default-chat"', page)
             self.assertIn("buddy_run", wrapper)
             self.assertIn('request.args.get("ui") == "chat"', wrapper)
+            self.assertIn("session_id", script)
+            self.assertIn("conversation_history", script)
+            self.assertIn("history.slice(-40)", script)
 
     def test_buddy_payload_round_trips_without_plaintext(self) -> None:
         value = buddy_payload(
@@ -249,7 +253,7 @@ if __name__ == "__main__":
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             inventory, neighborhoods, brainstem = self._roots(root)
-            name = 'x"""\nraise RuntimeError("INJECTED")\n#'
+            name = 'x"""; raise RuntimeError("INJECTED"); <script>'
             with patch("rapp_herdr.buddy._select_port", return_value=7205):
                 result = create_buddy(
                     buddy_payload(
@@ -272,10 +276,35 @@ if __name__ == "__main__":
             exec(source, namespace)
             self.assertIn("BuddyRoleAgent", namespace)
             self.assertNotIn(
-                '\nraise RuntimeError("INJECTED")\n',
+                'name = \'x"""; raise RuntimeError("INJECTED"); <script>\'',
                 source,
             )
             self.assertIn("raise RuntimeError", page)
+            self.assertNotIn("<script><script>", page)
+
+    def test_name_rejects_controls_before_creating_resources(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            inventory, neighborhoods, brainstem = self._roots(root)
+
+            with self.assertRaisesRegex(
+                Exception,
+                "unsafe control character",
+            ):
+                create_buddy(
+                    buddy_payload(
+                        "local",
+                        str(inventory),
+                        owner="test-owner",
+                        name="Persistence\nProbe",
+                        role="Chat.",
+                        neighborhood_root=str(neighborhoods),
+                        brainstem_root=str(brainstem),
+                    )
+                )
+
+            self.assertFalse(inventory.exists())
+            self.assertFalse(neighborhoods.exists())
 
     def test_owner_must_be_canonical_and_independent_from_device(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

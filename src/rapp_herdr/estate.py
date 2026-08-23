@@ -16,6 +16,7 @@ from typing import Any
 
 from .audit import audit_machine
 from .buddy import (
+    BUDDY_SCHEMA,
     add_buddy_neighborhood,
     buddy_chat_payload,
     buddy_cleanup_payload,
@@ -30,10 +31,12 @@ from .manager import NeighborhoodManager, _powershell_command
 from .model import RappHerdrError, load_neighborhood, resolve_topology
 from .probe import (
     PROBE_NEIGHBORHOOD_MANIFEST,
+    PROBE_SCHEMA,
     add_probe_neighborhoods,
     encode_probe_payload,
     probe_brainstem_python,
     probe_payload,
+    probe_rappid,
     run_probe_device,
 )
 from .receipts import ReceiptStore
@@ -52,6 +55,18 @@ def _required_text(value: Any, field: str) -> str:
     if "\0" in value or "\n" in value or "\r" in value:
         raise RappHerdrError(f"{field} contains an unsafe control character")
     return value.strip()
+
+
+def _manifest_identity(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.replace("\\", "/")
+    marker = "/.rapp/"
+    if marker in normalized:
+        return normalized[normalized.index(marker) + 1:]
+    if normalized.startswith("~/.rapp/"):
+        return normalized[2:]
+    return normalized
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -91,9 +106,13 @@ class EstateNeighborhood:
     bootstrap: bool
     listen_host: str
     entrypoint: str
+    managed_by: str | None = None
+    buddy_name: str | None = None
+    buddy_rappid: str | None = None
+    buddy_ui: str | None = None
 
     def payload(self) -> dict[str, Any]:
-        return {
+        value = {
             "manifest": self.manifest,
             "members": self.members,
             "estate_roots": list(self.estate_roots),
@@ -103,6 +122,15 @@ class EstateNeighborhood:
             "listen_host": self.listen_host,
             "entrypoint": self.entrypoint,
         }
+        if self.managed_by is not None:
+            value["managed_by"] = self.managed_by
+        if self.buddy_name is not None:
+            value["buddy"] = {
+                "name": self.buddy_name,
+                "rappid": self.buddy_rappid,
+                "ui": self.buddy_ui,
+            }
+        return value
 
 
 @dataclass(frozen=True)
@@ -242,6 +270,16 @@ def load_estate(path: str | Path) -> Estate:
                     f"estate.devices[{index}].neighborhoods"
                     f"[{neighborhood_index}] must be an object"
                 )
+            raw_buddy = neighborhood.get("buddy")
+            if raw_buddy is not None and not isinstance(raw_buddy, dict):
+                raise RappHerdrError("neighborhood.buddy must be an object")
+            if raw_buddy is not None and (
+                not isinstance(raw_buddy.get("ui"), str)
+                or raw_buddy.get("ui") not in {"chat", "rapplication"}
+            ):
+                raise RappHerdrError(
+                    "neighborhood.buddy.ui must be chat or rapplication"
+                )
             roots = neighborhood.get("estate_roots", ["~/.rapp/twins"])
             if not isinstance(roots, list) or not roots:
                 raise RappHerdrError("estate_roots must be a non-empty array")
@@ -280,6 +318,40 @@ def load_estate(path: str | Path) -> Estate:
                     entrypoint=_required_text(
                         neighborhood.get("entrypoint", "brainstem.py"),
                         "neighborhood.entrypoint",
+                    ),
+                    managed_by=(
+                        _required_text(
+                            neighborhood.get("managed_by"),
+                            "neighborhood.managed_by",
+                        )
+                        if neighborhood.get("managed_by") is not None
+                        else None
+                    ),
+                    buddy_name=(
+                        _required_text(
+                            raw_buddy.get("name"),
+                            "neighborhood.buddy.name",
+                        )
+                        if raw_buddy is not None
+                        else None
+                    ),
+                    buddy_rappid=(
+                        _required_text(
+                            raw_buddy.get("rappid"),
+                            "neighborhood.buddy.rappid",
+                        )
+                        if raw_buddy is not None
+                        and raw_buddy.get("rappid") is not None
+                        else None
+                    ),
+                    buddy_ui=(
+                        _required_text(
+                            raw_buddy.get("ui"),
+                            "neighborhood.buddy.ui",
+                        )
+                        if raw_buddy is not None
+                        and raw_buddy.get("ui") is not None
+                        else None
                     ),
                 )
             )
@@ -939,8 +1011,7 @@ class EstateManager:
             device.rapp_herdr_bin,
             "_buddy-device",
             action,
-            "--payload",
-            encode_buddy_payload(payload),
+            "--payload-stdin",
         ]
         command = (
             _powershell_command(arguments)
@@ -960,6 +1031,7 @@ class EstateManager:
                 ],
                 capture_output=True,
                 text=True,
+                input=encode_buddy_payload(payload),
                 timeout=max(self.timeout, 240),
                 check=False,
             )
@@ -1263,6 +1335,30 @@ class EstateManager:
         ui: str,
         port_start: int,
     ) -> dict[str, Any]:
+        device_id = _required_text(device_id, "buddy.device_id")
+        name = _required_text(name, "buddy.name")
+        if len(name) > 80:
+            raise RappHerdrError("buddy.name must be at most 80 characters")
+        if not isinstance(role, str) or not role.strip():
+            raise RappHerdrError("buddy.role must be a non-empty string")
+        role = role.strip()
+        if len(role) > 4_000 or "\0" in role or "\r" in role:
+            raise RappHerdrError("buddy.role is invalid")
+        if (
+            not isinstance(ui, str)
+            or ui not in {"auto", "chat", "rapplication"}
+        ):
+            raise RappHerdrError(
+                "buddy.ui must be auto, chat, or rapplication"
+            )
+        if (
+            isinstance(port_start, bool)
+            or not isinstance(port_start, int)
+            or not 7200 <= port_start <= 7299
+        ):
+            raise RappHerdrError(
+                "buddy.port_start must be an integer from 7200 to 7299"
+            )
         matches = [
             device
             for device in self.estate.devices
@@ -1350,7 +1446,27 @@ class EstateManager:
                 "error": f"buddy registration failed: {exc}",
                 "rollback": rollback,
             }
-        updated_estate = load_estate(self.estate.manifest_path)
+        try:
+            updated_estate = load_estate(self.estate.manifest_path)
+        except RappHerdrError as exc:
+            rollback = self._rollback_buddy(
+                device,
+                runner,
+                created,
+                registered=registered,
+                updated_device=None,
+            )
+            return {
+                "ok": False,
+                "schema": ESTATE_SCHEMA,
+                "estate": self.estate.name,
+                "action": "buddy-create",
+                "device": device.id,
+                "created": created,
+                "registered": registered,
+                "error": f"registered buddy manifest is invalid: {exc}",
+                "rollback": rollback,
+            }
         updated_device = next(
             current for current in updated_estate.devices
             if current.id == device.id
@@ -1579,6 +1695,48 @@ class EstateManager:
             device.id: device for device in self.estate.devices
         }
         candidates: list[dict[str, Any]] = []
+        for device in self.estate.devices:
+            if not device.enabled:
+                continue
+            for configured in device.neighborhoods:
+                if (
+                    configured.managed_by != BUDDY_SCHEMA
+                    or configured.buddy_name is None
+                ):
+                    continue
+                identity = str(
+                    configured.buddy_rappid or configured.buddy_name
+                )
+                buddy_id = hashlib.sha256(
+                    f"{device.id}\0{identity}".encode()
+                ).hexdigest()[:20]
+                candidates.append(
+                    {
+                        "id": buddy_id,
+                        "name": configured.buddy_name,
+                        "device": device.id,
+                        "rappid": configured.buddy_rappid,
+                        "presence": "offline",
+                        "status": "offline",
+                        "herdr_status": "down",
+                        "transport": (
+                            "local"
+                            if device.transport == "local"
+                            else "ssh-windows"
+                            if device.os == "windows"
+                            else "ssh-posix"
+                        ),
+                        "via_probe": False,
+                        "ui": configured.buddy_ui,
+                        "application_url": None,
+                        "default_chat_url": None,
+                        "_url": (
+                            f"http://127.0.0.1:{configured.base_port}"
+                        ),
+                        "_device": device,
+                        "_observed": False,
+                    }
+                )
         for observed in status.get("devices", []):
             if not isinstance(observed, dict):
                 continue
@@ -1594,14 +1752,27 @@ class EstateManager:
                 )
                 if not isinstance(result, dict):
                     continue
+                configured = next(
+                    (
+                        item for item in device.neighborhoods
+                        if _manifest_identity(item.manifest)
+                        == _manifest_identity(neighborhood.get("manifest"))
+                    ),
+                    None,
+                )
                 for member in result.get("members", []):
                     if not isinstance(member, dict):
                         continue
                     url = member.get("url")
                     if not isinstance(url, str):
                         continue
-                    is_probe = str(member.get("name") or "").startswith(
-                        "Persistence Probe"
+                    is_probe = bool(
+                        configured is not None
+                        and configured.managed_by == PROBE_SCHEMA
+                        and _manifest_identity(configured.manifest)
+                        == _manifest_identity(PROBE_NEIGHBORHOOD_MANIFEST)
+                        and member.get("rappid")
+                        == probe_rappid(device.id)
                     )
                     target = device.probe_target if is_probe else None
                     name = target.name if target else member.get("name")
@@ -1612,6 +1783,10 @@ class EstateManager:
                     ).hexdigest()[:20]
                     healthy = bool(
                         member.get("healthy") and member.get("live")
+                        and (
+                            not is_probe
+                            or member.get("probe_target_healthy") is True
+                        )
                     )
                     candidates.append(
                         {
@@ -1630,14 +1805,37 @@ class EstateManager:
                                 else "ssh-posix"
                             ),
                             "via_probe": is_probe,
+                            "ui": (
+                                configured.buddy_ui
+                                if configured is not None
+                                else None
+                            ),
+                            "application_url": (
+                                url
+                                if configured is not None
+                                and configured.buddy_ui == "rapplication"
+                                and device.transport == "local"
+                                else None
+                            ),
+                            "default_chat_url": (
+                                f"{url}/?ui=chat"
+                                if configured is not None
+                                and configured.buddy_ui == "rapplication"
+                                and device.transport == "local"
+                                else None
+                            ),
                             "_url": url,
                             "_device": device,
+                            "_observed": True,
                         }
                     )
         selected: dict[str, dict[str, Any]] = {}
         for candidate in sorted(
             candidates,
-            key=lambda item: bool(item["via_probe"]),
+            key=lambda item: (
+                bool(item["via_probe"]),
+                not bool(item["_observed"]),
+            ),
         ):
             key = (
                 f"{candidate['device']}\0"
@@ -1664,6 +1862,9 @@ class EstateManager:
             "schema": ESTATE_SCHEMA,
             "estate": self.estate.name,
             "action": "buddy-list",
+            "devices": sorted(
+                device.id for device in self.estate.devices if device.enabled
+            ),
             "buddies": buddies,
         }
 

@@ -45,6 +45,13 @@ def _required_text(value: Any, field: str, limit: int = 4_000) -> str:
     return text
 
 
+def _manifest_text(value: Any, field: str, limit: int) -> str:
+    text = _required_text(value, field, limit)
+    if any(ord(character) < 32 or ord(character) == 127 for character in text):
+        raise RappHerdrError(f"{field} contains an unsafe control character")
+    return text
+
+
 def _slug(value: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
     if not slug or not _SAFE_ID.fullmatch(slug):
@@ -305,7 +312,7 @@ runpy.run_path({str(brainstem_root / "brainstem.py")!r}, run_name="__main__")
 def _custom_ui(name: str, role: str) -> tuple[str, str, str]:
     safe_name = html.escape(name)
     safe_role = html.escape(role)
-    js = '''document.getElementById("chat").addEventListener("submit",async(event)=>{event.preventDefault();const message=document.getElementById("message").value.trim();if(!message)return;const output=document.getElementById("response");output.textContent="Working...";try{const response=await fetch("/chat",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({schema:"rapp-chat/1.0",message,user_input:message})});const value=await response.json();output.textContent=value.response||value.error||"No response";}catch(error){output.textContent=error.message;}});'''
+    js = '''let sessionId=null;const history=[];document.getElementById("chat").addEventListener("submit",async(event)=>{event.preventDefault();const message=document.getElementById("message").value.trim();if(!message)return;const output=document.getElementById("response");output.textContent="Working...";try{const body={schema:"rapp-chat/1.0",message,user_input:message,conversation_history:history.slice(-40)};if(sessionId)body.session_id=sessionId;const response=await fetch("/chat",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});const value=await response.json();const answer=value.response||value.error||"No response";if(value.session_id)sessionId=value.session_id;history.push({role:"user",content:message},{role:"assistant",content:answer});if(history.length>40)history.splice(0,history.length-40);output.textContent=answer;}catch(error){output.textContent=error.message;}});'''
     page = f'''<!doctype html>
 <html lang="en">
 <head>
@@ -338,7 +345,7 @@ def create_buddy(value: dict[str, Any]) -> dict[str, Any]:
     owner = _required_text(value.get("owner"), "buddy.owner", 39)
     if not _OWNER.fullmatch(owner):
         raise RappHerdrError("buddy.owner is not a canonical RAPP/1 owner")
-    name = _required_text(value.get("name"), "buddy.name", 80)
+    name = _manifest_text(value.get("name"), "buddy.name", 80)
     role = _required_text(value.get("role"), "buddy.role")
     slug = _slug(name)
     selected_ui = _ui_mode(str(value.get("ui") or "auto"), role)
@@ -512,6 +519,11 @@ def create_buddy(value: dict[str, Any]) -> dict[str, Any]:
             "listen_host": "127.0.0.1",
             "entrypoint": "brainstem.py",
             "managed_by": BUDDY_SCHEMA,
+            "buddy": {
+                "name": name,
+                "rappid": rappid,
+                "ui": selected_ui,
+            },
         },
     }
 
@@ -744,7 +756,11 @@ def add_buddy_neighborhood(
     neighborhoods.append(registered)
     from .backup import replace_estate_manifest
 
-    replaced = replace_estate_manifest(manifest, value)
+    replaced = replace_estate_manifest(
+        manifest,
+        value,
+        expected_hash=current_hash,
+    )
     manifest_hash_after = hashlib.sha256(manifest.read_bytes()).hexdigest()
     return {
         "ok": True,
@@ -795,5 +811,9 @@ def remove_buddy_neighborhood(
     neighborhoods.remove(owned[0])
     from .backup import replace_estate_manifest
 
-    replace_estate_manifest(manifest, value)
+    replace_estate_manifest(
+        manifest,
+        value,
+        expected_hash=expected_hash,
+    )
     return {"ok": True, "device": device_id, "removed": buddy_manifest}

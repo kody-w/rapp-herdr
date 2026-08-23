@@ -189,6 +189,19 @@ registers and launches it through Herdr, then marks it online only after an
 identity-nonce health check and a real `/chat` response ending in `READY`.
 Failure rolls back only resources carrying the matching buddy ownership marker.
 
+The central roster and chat RPCs keep clients from reimplementing device
+routing:
+
+```bash
+rapp-herdr estate buddy list ~/.config/rapp-herdr/estate.json
+rapp-herdr estate buddy chat ~/.config/rapp-herdr/estate.json \
+  --buddy BUDDY_ID --message "Are you ready?"
+```
+
+Embedded clients may add `--stdin` to `buddy create` or `buddy chat` and send
+the corresponding JSON object over standard input, keeping roles and messages
+out of process arguments.
+
 The estate projection has two complementary layers:
 
 - **Runtime neighborhoods:** one Herdr workspace per RAPP neighborhood, one

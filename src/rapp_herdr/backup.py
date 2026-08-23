@@ -11,6 +11,7 @@ from typing import Any
 
 from .estate import ESTATE_SCHEMA, load_estate
 from .model import RappHerdrError
+from .receipts import ReceiptStore
 
 BACKUP_SCHEMA = "rapp-herdr-estate-backup/1.0"
 MAX_BACKUP_BYTES = 2 * 1024 * 1024
@@ -122,6 +123,8 @@ def import_estate_backup(
 def replace_estate_manifest(
     manifest: str | Path,
     estate: dict[str, Any],
+    *,
+    expected_hash: str | None = None,
 ) -> dict[str, Any]:
     manifest_path = Path(manifest).expanduser().resolve()
     if not manifest_path.is_file():
@@ -136,6 +139,7 @@ def replace_estate_manifest(
         manifest_path,
         estate,
         source_schema=ESTATE_SCHEMA,
+        expected_hash=expected_hash,
     )
 
 
@@ -144,6 +148,7 @@ def _replace_estate_manifest(
     estate: dict[str, Any],
     *,
     source_schema: str,
+    expected_hash: str | None = None,
 ) -> dict[str, Any]:
     candidate = _write_candidate(
         manifest_path.parent,
@@ -151,14 +156,32 @@ def _replace_estate_manifest(
     )
     try:
         validated = load_estate(candidate)
-        rollback = _rollback_path(manifest_path)
-        rollback_candidate = _write_candidate(
-            manifest_path.parent,
-            manifest_path.read_bytes(),
+        lock_digest = hashlib.sha256(
+            str(manifest_path).encode()
+        ).hexdigest()[:32]
+        lock_path = (
+            ReceiptStore().root
+            / "estate-manifests"
+            / f"{lock_digest}.json"
         )
-        os.replace(rollback_candidate, rollback)
-        os.replace(candidate, manifest_path)
-        manifest_path.chmod(0o600)
+        with ReceiptStore().operation_lock(lock_path, wait_timeout=30):
+            current_bytes = manifest_path.read_bytes()
+            current_hash = hashlib.sha256(current_bytes).hexdigest()
+            if (
+                expected_hash is not None
+                and not hmac.compare_digest(expected_hash, current_hash)
+            ):
+                raise RappHerdrError(
+                    "estate manifest changed before replacement"
+                )
+            rollback = _rollback_path(manifest_path)
+            rollback_candidate = _write_candidate(
+                manifest_path.parent,
+                current_bytes,
+            )
+            os.replace(rollback_candidate, rollback)
+            os.replace(candidate, manifest_path)
+            manifest_path.chmod(0o600)
     except BaseException:
         candidate.unlink(missing_ok=True)
         raise

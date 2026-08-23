@@ -79,7 +79,20 @@ with relay_lock, state_file_lock(), state_lock:
 def health():
     with state_file_lock(), state_lock:
         state = read_state()
-    return jsonify({"status": "ok", "service": "rapp-herdr-persistence-probe", "probe": state})
+    target = state.get("relay_target")
+    target_healthy = False
+    if isinstance(target, dict):
+        try:
+            with urllib.request.urlopen(target["url"] + "/health", timeout=1) as response:
+                target_healthy = 200 <= int(response.status) < 300
+        except (OSError, urllib.error.URLError):
+            target_healthy = False
+    return jsonify({
+        "status": "ok",
+        "service": "rapp-herdr-persistence-probe",
+        "target_healthy": target_healthy,
+        "probe": state,
+    })
 
 def relay_turn(target, user_input, session_id):
     body = {
@@ -643,7 +656,8 @@ def add_probe_neighborhoods(
 ) -> dict[str, Any]:
     manifest_path = Path(manifest).expanduser().resolve()
     try:
-        value = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest_bytes = manifest_path.read_bytes()
+        value = json.loads(manifest_bytes)
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise RappHerdrError(f"cannot update estate manifest {manifest_path}: {exc}") from exc
     devices = value.get("devices") if isinstance(value, dict) else None
@@ -693,7 +707,11 @@ def add_probe_neighborhoods(
         return {"ok": True, "changed": False, "devices": configured}
     from .backup import replace_estate_manifest
 
-    result = replace_estate_manifest(manifest_path, value)
+    result = replace_estate_manifest(
+        manifest_path,
+        value,
+        expected_hash=hashlib.sha256(manifest_bytes).hexdigest(),
+    )
     return {
         "ok": True,
         "changed": True,

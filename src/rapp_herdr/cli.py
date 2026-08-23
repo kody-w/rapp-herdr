@@ -93,15 +93,20 @@ def _parser() -> argparse.ArgumentParser:
         "manifest",
         help="Path to rapp-herdr estate JSON",
     )
-    estate_buddy_create.add_argument("--device", required=True)
-    estate_buddy_create.add_argument("--name", required=True)
-    estate_buddy_create.add_argument("--role", required=True)
+    estate_buddy_create.add_argument("--device")
+    estate_buddy_create.add_argument("--name")
+    estate_buddy_create.add_argument("--role")
     estate_buddy_create.add_argument(
         "--ui",
         choices=["auto", "chat", "rapplication"],
         default="auto",
     )
     estate_buddy_create.add_argument("--port-start", type=int, default=7200)
+    estate_buddy_create.add_argument(
+        "--stdin",
+        action="store_true",
+        help="Read buddy definition JSON from stdin",
+    )
     estate_buddy_create.add_argument("--ssh", help="Path to the SSH binary")
     estate_buddy_list = estate_buddy_commands.add_parser("list")
     estate_buddy_list.add_argument(
@@ -114,9 +119,14 @@ def _parser() -> argparse.ArgumentParser:
         "manifest",
         help="Path to rapp-herdr estate JSON",
     )
-    estate_buddy_chat.add_argument("--buddy", required=True)
-    estate_buddy_chat.add_argument("--message", required=True)
+    estate_buddy_chat.add_argument("--buddy")
+    estate_buddy_chat.add_argument("--message")
     estate_buddy_chat.add_argument("--session-id")
+    estate_buddy_chat.add_argument(
+        "--stdin",
+        action="store_true",
+        help="Read buddy chat JSON from stdin",
+    )
     estate_buddy_chat.add_argument("--ssh", help="Path to the SSH binary")
 
     doctor = commands.add_parser("doctor")
@@ -154,7 +164,14 @@ def _parser() -> argparse.ArgumentParser:
         "action",
         choices=["create", "handshake", "delete", "chat"],
     )
-    buddy_device.add_argument("--payload", required=True)
+    buddy_device_payload = buddy_device.add_mutually_exclusive_group(
+        required=True
+    )
+    buddy_device_payload.add_argument("--payload")
+    buddy_device_payload.add_argument(
+        "--payload-stdin",
+        action="store_true",
+    )
 
     cell = commands.add_parser("_cell", help=argparse.SUPPRESS)
     cell_payload = cell.add_mutually_exclusive_group(required=True)
@@ -205,9 +222,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             _print(result)
             return 0 if result.get("ok") else 1
         if args.command == "_buddy-device":
+            encoded = args.payload
+            if args.payload_stdin:
+                encoded = sys.stdin.read(2 * 1024 * 1024 + 1)
+                if len(encoded) > 2 * 1024 * 1024:
+                    raise RappHerdrError(
+                        "buddy stdin payload exceeds 2 MiB"
+                    )
             result = run_buddy_device(
                 args.action,
-                decode_buddy_payload(args.payload),
+                decode_buddy_payload(encoded),
             )
             _print(result)
             return 0 if result.get("ok") else 1
@@ -227,21 +251,122 @@ def main(argv: Sequence[str] | None = None) -> int:
                     base_port=args.base_port,
                 )
             elif args.estate_command == "buddy":
+                buddy_input: dict[str, object] = {}
+                if getattr(args, "stdin", False):
+                    try:
+                        loaded = json.load(sys.stdin)
+                    except (UnicodeError, json.JSONDecodeError) as exc:
+                        raise RappHerdrError(
+                            f"invalid buddy stdin JSON: {exc}"
+                        ) from exc
+                    if not isinstance(loaded, dict):
+                        raise RappHerdrError(
+                            "buddy stdin JSON must contain an object"
+                        )
+                    buddy_input = loaded
                 if args.buddy_action == "create":
+                    def required_buddy_text(
+                        key: str,
+                        fallback: object,
+                    ) -> str:
+                        value = (
+                            buddy_input[key]
+                            if key in buddy_input
+                            else fallback
+                        )
+                        if not isinstance(value, str) or not value.strip():
+                            raise RappHerdrError(
+                                f"buddy {key} must be a non-empty string"
+                            )
+                        return value
+
+                    raw_ui = (
+                        buddy_input["ui"]
+                        if "ui" in buddy_input
+                        else args.ui
+                    )
+                    if (
+                        not isinstance(raw_ui, str)
+                        or raw_ui not in {"auto", "chat", "rapplication"}
+                    ):
+                        raise RappHerdrError(
+                            "buddy ui must be auto, chat, or rapplication"
+                        )
+                    raw_port_start = (
+                        buddy_input["port_start"]
+                        if "port_start" in buddy_input
+                        else args.port_start
+                    )
+                    if (
+                        isinstance(raw_port_start, bool)
+                        or not isinstance(raw_port_start, int)
+                        or not 1 <= raw_port_start <= 65535
+                    ):
+                        raise RappHerdrError(
+                            "buddy port_start must be an integer from 1 to 65535"
+                        )
                     result = manager.create_buddy(
-                        device_id=args.device,
-                        name=args.name,
-                        role=args.role,
-                        ui=args.ui,
-                        port_start=args.port_start,
+                        device_id=required_buddy_text(
+                            "device_id",
+                            args.device,
+                        ),
+                        name=required_buddy_text(
+                            "name",
+                            args.name,
+                        ),
+                        role=required_buddy_text(
+                            "role",
+                            args.role,
+                        ),
+                        ui=raw_ui,
+                        port_start=raw_port_start,
                     )
                 elif args.buddy_action == "list":
                     result = manager.list_buddies()
                 else:
+                    raw_buddy_id = (
+                        buddy_input["buddy_id"]
+                        if "buddy_id" in buddy_input
+                        else args.buddy
+                    )
+                    raw_message = (
+                        buddy_input["message"]
+                        if "message" in buddy_input
+                        else args.message
+                    )
+                    raw_session_id = (
+                        buddy_input["session_id"]
+                        if "session_id" in buddy_input
+                        else args.session_id
+                    )
+                    if (
+                        not isinstance(raw_buddy_id, str)
+                        or not raw_buddy_id.strip()
+                    ):
+                        raise RappHerdrError(
+                            "buddy buddy_id must be a non-empty string"
+                        )
+                    if (
+                        not isinstance(raw_message, str)
+                        or not raw_message.strip()
+                    ):
+                        raise RappHerdrError(
+                            "buddy message must be a non-empty string"
+                        )
+                    if (
+                        raw_session_id is not None
+                        and (
+                            not isinstance(raw_session_id, str)
+                            or not raw_session_id.strip()
+                        )
+                    ):
+                        raise RappHerdrError(
+                            "buddy session_id must be a non-empty string"
+                        )
                     result = manager.chat_buddy(
-                        buddy_id=args.buddy,
-                        message=args.message,
-                        session_id=args.session_id,
+                        buddy_id=raw_buddy_id,
+                        message=raw_message,
+                        session_id=raw_session_id,
                     )
             else:
                 result = manager.run(args.estate_command)

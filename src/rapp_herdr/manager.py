@@ -737,14 +737,35 @@ class NeighborhoodManager:
 
     @staticmethod
     def _health(url: str, launch_nonce: str) -> bool:
+        healthy, _details = NeighborhoodManager._health_details(
+            url,
+            launch_nonce,
+        )
+        return healthy
+
+    @staticmethod
+    def _health_details(
+        url: str,
+        launch_nonce: str,
+    ) -> tuple[bool, dict[str, Any] | None]:
         try:
-            with urllib.request.urlopen(f"{url}/health", timeout=1) as response:
-                return (
+            with urllib.request.urlopen(f"{url}/health", timeout=2) as response:
+                healthy = (
                     200 <= int(response.status) < 300
                     and response.headers.get(LAUNCH_HEADER) == launch_nonce
                 )
+                if not healthy:
+                    return False, None
+                payload = response.read(64 * 1024 + 1)
+                if len(payload) > 64 * 1024:
+                    return True, None
+                try:
+                    value = json.loads(payload)
+                except (UnicodeError, json.JSONDecodeError):
+                    return True, None
+                return True, value if isinstance(value, dict) else None
         except (OSError, urllib.error.URLError):
-            return False
+            return False, None
 
     def _status_receipt(self, receipt: dict[str, Any]) -> dict[str, Any]:
         herdr = receipt.get("herdr")
@@ -801,6 +822,23 @@ class NeighborhoodManager:
             status = pane.get("agent_status") if pane else "missing"
             url = member.get("url")
             launch_nonce = member.get("launch_nonce")
+            healthy = False
+            health_details = None
+            if isinstance(url, str) and isinstance(launch_nonce, str):
+                healthy = self._health(url, launch_nonce)
+                if (
+                    healthy
+                    and isinstance(member.get("rappid"), str)
+                    and str(member["rappid"]).startswith(
+                        "rappid:@rapp/persistence-probe-"
+                    )
+                ):
+                    details_healthy, health_details = self._health_details(
+                        url,
+                        launch_nonce,
+                    )
+                    if not details_healthy:
+                        health_details = None
             member_status.append(
                 {
                     "name": member.get("name"),
@@ -809,10 +847,13 @@ class NeighborhoodManager:
                     "port": member.get("port"),
                     "url": url,
                     "agent_status": status,
-                    "healthy": bool(
-                        isinstance(url, str)
-                        and isinstance(launch_nonce, str)
-                        and self._health(url, launch_nonce)
+                    "healthy": healthy,
+                    "probe_target_healthy": (
+                        health_details.get("target_healthy")
+                        if isinstance(health_details, dict)
+                        and health_details.get("service")
+                        == "rapp-herdr-persistence-probe"
+                        else None
                     ),
                     "managed": matches_owner,
                     "live": live,
