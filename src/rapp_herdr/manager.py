@@ -573,7 +573,67 @@ class NeighborhoodManager:
                 )
             status = self._status_receipt(existing)
             if status["managed"]:
-                return status
+                members_by_rappid = {
+                    member.get("rappid"): member
+                    for member in existing.get("members", [])
+                    if isinstance(member, dict)
+                }
+                twins_by_rappid = {
+                    twin.rappid: twin for twin in topology.twins
+                }
+                launch = existing.get("launch")
+                if not isinstance(launch, dict):
+                    raise RappHerdrError("managed receipt has no launch configuration")
+                python: Path | None = None
+                changed = False
+                for member_status in status.get("members", []):
+                    rappid = member_status.get("rappid")
+                    member = members_by_rappid.get(rappid)
+                    twin = twins_by_rappid.get(rappid)
+                    if member is None or twin is None:
+                        raise RappHerdrError(
+                            f"managed receipt references unknown Twin {rappid!r}"
+                        )
+                    if member_status.get("live"):
+                        if not member_status.get("healthy"):
+                            self._wait_until_ready(
+                                str(member["pane_id"]),
+                                int(member["port"]),
+                                str(member["launch_nonce"]),
+                            )
+                        continue
+                    if python is None:
+                        python = Path(
+                            str(launch.get("python", ""))
+                        ).expanduser().resolve()
+                        if not python.is_file():
+                            raise RappHerdrError(
+                                f"managed Twin interpreter is unavailable: {python}"
+                            )
+                    launch_nonce = secrets.token_urlsafe(24)
+                    member["launch_nonce"] = launch_nonce
+                    command = _internal_twin_command(
+                        workspace=twin.workspace,
+                        python=python,
+                        port=int(member["port"]),
+                        name=twin.name,
+                        rappid=twin.rappid,
+                        neighborhood=topology.neighborhood.name,
+                        listen_host=listen_host,
+                        entrypoint=entrypoint,
+                        launch_nonce=launch_nonce,
+                        herdr_binary=self.client.binary,
+                    )
+                    self.client.run_pane(str(member["pane_id"]), command)
+                    self._wait_until_ready(
+                        str(member["pane_id"]),
+                        int(member["port"]),
+                        launch_nonce,
+                    )
+                    changed = True
+                if changed:
+                    self.receipts.write(receipt_path, existing)
+                return self._status_receipt(existing)
             raise RappHerdrError(
                 f"stale or divergent receipt at {receipt_path}; "
                 "inspect status and run neighborhood down before recreating"
@@ -731,12 +791,13 @@ class NeighborhoodManager:
                 continue
             pane = panes.get(member.get("pane_id"))
             workspace_path = member.get("workspace")
-            matches = bool(
+            matches_owner = bool(
                 pane
-                and pane.get("agent") == "rapp-twin"
                 and pane.get("cwd") == workspace_path
+                and pane.get("terminal_id") == member.get("terminal_id")
             )
-            managed = managed and matches
+            live = bool(pane and pane.get("agent") == "rapp-twin")
+            managed = managed and matches_owner
             status = pane.get("agent_status") if pane else "missing"
             url = member.get("url")
             launch_nonce = member.get("launch_nonce")
@@ -753,17 +814,18 @@ class NeighborhoodManager:
                         and isinstance(launch_nonce, str)
                         and self._health(url, launch_nonce)
                     ),
-                    "managed": matches,
+                    "managed": matches_owner,
+                    "live": live,
                 }
             )
-        all_healthy = bool(member_status) and all(
-            member["healthy"] for member in member_status
+        all_live_and_healthy = bool(member_status) and all(
+            member["live"] and member["healthy"] for member in member_status
         )
         return {
             "schema": RECEIPT_SCHEMA,
             "state": (
                 "running"
-                if managed and all_healthy
+                if managed and all_live_and_healthy
                 else "degraded"
                 if managed
                 else "diverged"

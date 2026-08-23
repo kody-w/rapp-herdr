@@ -24,18 +24,26 @@ class HerdrReporter:
         rappid: str,
         twin_name: str,
         neighborhood_name: str,
-        port: int,
+        port: int | None,
         binary: str | None = None,
+        agent: str = "rapp-twin",
+        display_agent: str = "RAPP Twin",
+        tokens: dict[str, str] | None = None,
     ):
         self.workspace = workspace.resolve()
         self.rappid = rappid
         self.twin_name = twin_name
         self.neighborhood_name = neighborhood_name
         self.port = port
+        self.agent = agent
+        self.display_agent = display_agent
+        self.extra_tokens = dict(tokens or {})
         self.binary = binary or os.environ.get("HERDR_BIN_PATH") or shutil.which("herdr")
         self.pane_id = os.environ.get("HERDR_PANE_ID")
-        source_hash = hashlib.sha256(str(self.workspace).encode()).hexdigest()[:16]
-        self.source = f"rapp-herdr:{source_hash}"
+        source_hash = hashlib.sha256(
+            f"{self.agent}\0{self.workspace}".encode()
+        ).hexdigest()[:16]
+        self.source = f"rapp-herdr:{self.agent}:{source_hash}"
         self.metadata_source = f"{self.source}:metadata"
         self._sequence = 0
         self._lock = threading.Lock()
@@ -95,7 +103,7 @@ class HerdrReporter:
             "--source",
             self.source,
             "--agent",
-            "rapp-twin",
+            self.agent,
             "--seq",
             str(sequence),
             "--agent-session-id",
@@ -104,35 +112,37 @@ class HerdrReporter:
             str(self.workspace),
             strict=strict,
         )
-        self._command(
+        metadata_args = [
             "report-metadata",
             self.pane_id or "",
             "--source",
             self.metadata_source,
             "--agent",
-            "rapp-twin",
+            self.agent,
             "--applies-to-source",
             self.source,
             "--title",
             self.twin_name[:120],
             "--display-agent",
-            "RAPP Twin",
+            self.display_agent,
             "--state-label",
             "idle=Ready",
             "--state-label",
             "working=Thinking",
             "--state-label",
             "blocked=Blocked",
-            "--token",
-            f"neighborhood={self.neighborhood_name[:120]}",
-            "--token",
-            f"port={self.port}",
-            "--token",
-            f"endpoint=http://127.0.0.1:{self.port}",
-            "--seq",
-            str(self._next_sequence()),
-            strict=strict,
-        )
+        ]
+        token_values = {
+            "neighborhood": self.neighborhood_name[:120],
+            **self.extra_tokens,
+        }
+        if self.port is not None:
+            token_values["port"] = str(self.port)
+            token_values["endpoint"] = f"http://127.0.0.1:{self.port}"
+        for name, value in sorted(token_values.items()):
+            metadata_args.extend(["--token", f"{name}={value[:500]}"])
+        metadata_args.extend(["--seq", str(self._next_sequence())])
+        self._command(*metadata_args, strict=strict)
         self.state("working", "starting Twin brainstem", strict=strict)
 
     def state(
@@ -158,7 +168,7 @@ class HerdrReporter:
             "--source",
             self.source,
             "--agent",
-            "rapp-twin",
+            self.agent,
             "--state",
             state,
             "--seq",
@@ -177,34 +187,33 @@ class HerdrReporter:
             if self._released:
                 return
             self._released = True
-        self._command(
+        clear_args = [
             "report-metadata",
             self.pane_id or "",
             "--source",
             self.metadata_source,
             "--agent",
-            "rapp-twin",
+            self.agent,
             "--applies-to-source",
             self.source,
             "--clear-title",
             "--clear-display-agent",
             "--clear-state-labels",
-            "--clear-token",
-            "neighborhood",
-            "--clear-token",
-            "port",
-            "--clear-token",
-            "endpoint",
-            "--seq",
-            str(self._next_sequence()),
-        )
+        ]
+        token_names = {"neighborhood", *self.extra_tokens}
+        if self.port is not None:
+            token_names.update({"port", "endpoint"})
+        for name in sorted(token_names):
+            clear_args.extend(["--clear-token", name])
+        clear_args.extend(["--seq", str(self._next_sequence())])
+        self._command(*clear_args)
         self._command(
             "release-agent",
             self.pane_id or "",
             "--source",
             self.source,
             "--agent",
-            "rapp-twin",
+            self.agent,
             "--seq",
             str(self._next_sequence()),
         )

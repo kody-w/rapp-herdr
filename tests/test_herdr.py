@@ -83,6 +83,16 @@ class HerdrClientTests(unittest.TestCase):
 
             self.assertEqual(client.binary, str(executable.resolve()))
 
+    @patch("rapp_herdr.herdr.subprocess.run")
+    def test_pane_read_returns_raw_terminal_text(self, run) -> None:
+        run.return_value = subprocess.CompletedProcess(
+            [], 0, stdout="raw pane output\n", stderr=""
+        )
+
+        output = HerdrClient(binary="/bin/herdr").read_pane("w1:p1")
+
+        self.assertEqual(output, "raw pane output\n")
+
 
 if __name__ == "__main__":
     unittest.main()

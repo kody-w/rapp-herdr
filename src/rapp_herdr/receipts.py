@@ -30,19 +30,30 @@ class ReceiptStore:
         digest = hashlib.sha256(material).hexdigest()[:32]
         return self.root / "neighborhoods" / f"{digest}.json"
 
-    def load(self, path: Path) -> dict[str, Any] | None:
+    def load(
+        self,
+        path: Path,
+        *,
+        schema: str = RECEIPT_SCHEMA,
+    ) -> dict[str, Any] | None:
         if not path.exists():
             return None
         try:
             value = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, UnicodeError, json.JSONDecodeError) as exc:
             raise RappHerdrError(f"invalid rapp-herdr receipt {path}: {exc}") from exc
-        if not isinstance(value, dict) or value.get("schema") != RECEIPT_SCHEMA:
+        if not isinstance(value, dict) or value.get("schema") != schema:
             raise RappHerdrError(f"unsupported rapp-herdr receipt: {path}")
         return value
 
-    def write(self, path: Path, receipt: dict[str, Any]) -> None:
-        if receipt.get("schema") != RECEIPT_SCHEMA:
+    def write(
+        self,
+        path: Path,
+        receipt: dict[str, Any],
+        *,
+        schema: str = RECEIPT_SCHEMA,
+    ) -> None:
+        if receipt.get("schema") != schema:
             raise RappHerdrError("refusing to write a receipt with an unknown schema")
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(path.parent, 0o700)

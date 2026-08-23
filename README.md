@@ -107,6 +107,73 @@ herdr --remote HOST --session twins
 identity and neighborhood manifests remain the source of truth; Herdr is the
 runtime control plane.
 
+## Run the full estate
+
+An operator-local `rapp-herdr-estate/1.0` manifest composes device SSH aliases,
+RAPP neighborhoods, Twin inventory roots, and generated estate catalogs
+without replacing any of them. Start from
+[`examples/estate.example.json`](examples/estate.example.json).
+
+```bash
+rapp-herdr estate plan ~/.config/rapp-herdr/estate.json
+rapp-herdr estate up ~/.config/rapp-herdr/estate.json
+rapp-herdr estate status ~/.config/rapp-herdr/estate.json
+rapp-herdr estate down ~/.config/rapp-herdr/estate.json
+```
+
+Launch the live, read-only topology dashboard:
+
+```bash
+rapp-herdr ui ~/.config/rapp-herdr/estate.json --open
+```
+
+The dashboard refreshes from real `estate status` observations: device
+reachability, Herdr sessions, runtime neighborhoods, estate workspaces,
+neighborhood workers, assigned/unassigned Twins, and separately classified
+non-Twin organisms. It is loopback-only, validates the browser authority, and
+requires the unguessable token printed in its per-launch URL.
+
+The estate projection has two complementary layers:
+
+- **Runtime neighborhoods:** one Herdr workspace per RAPP neighborhood, one
+  managed Twin brainstem per tab.
+- **Estate catalogs:** one Herdr workspace per RAPP estate, one persistent
+  `rapp-neighborhood` worker per declared neighborhood tab. A command sent to
+  that pane lazily routes into the neighborhood agent or one of its factories,
+  so factories are not all resident until used.
+
+Each device runs the same local device operation. The controller sends only a
+base64 JSON payload over an operator-declared SSH alias; it never builds remote
+shell text from paths, prompts, or identity values. Disabled or unreachable
+devices remain visible in status.
+
+Within a neighborhood pane:
+
+```text
+/list
+hello, route this work
+build_factory: implement and review the requested change
+/quit
+```
+
+This gives Copilot or a human one stable command surface for the full local
+network estate while keeping RAPP identity, neighborhood membership, and
+device ownership authoritative at their existing sources.
+
+## Pinned Herdr source
+
+The upstream [herdrdev/herdr](https://github.com/herdrdev/herdr) source is
+pinned unmodified as the `herdr/` submodule (Apache-2.0). Clone this repository
+with:
+
+```bash
+git clone --recurse-submodules https://github.com/kody-w/rapp-herdr.git
+```
+
+Normal installations use Herdr's signed release binary. The submodule provides
+an auditable source pin and a development/build surface without maintaining a
+private fork.
+
 ## Safety boundaries
 
 - No RAPP manifest, membership roster, Twin kernel, or Herdr source is edited.

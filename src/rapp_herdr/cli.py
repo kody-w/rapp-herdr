@@ -7,11 +7,19 @@ import sys
 from pathlib import Path
 from typing import Sequence
 
+from .cell import decode_cell_payload, load_cell_payload, run_cell
+from .estate import (
+    EstateManager,
+    decode_device_payload,
+    load_estate,
+    run_estate_device,
+)
 from .herdr import HerdrClient
 from .manager import NeighborhoodManager
 from .model import RappHerdrError, load_neighborhood, resolve_topology
 from .receipts import ReceiptStore
 from .supervisor import supervise
+from .ui import run_ui
 
 
 def _add_common(parser: argparse.ArgumentParser) -> None:
@@ -56,9 +64,25 @@ def _parser() -> argparse.ArgumentParser:
     down = neighborhood_commands.add_parser("down")
     _add_common(down)
 
+    estate = commands.add_parser("estate")
+    estate_commands = estate.add_subparsers(
+        dest="estate_command",
+        required=True,
+    )
+    for action in ("plan", "up", "status", "down"):
+        action_parser = estate_commands.add_parser(action)
+        action_parser.add_argument("manifest", help="Path to rapp-herdr estate JSON")
+        action_parser.add_argument("--ssh", help="Path to the SSH binary")
+
     doctor = commands.add_parser("doctor")
     doctor.add_argument("--session")
     doctor.add_argument("--herdr")
+
+    ui = commands.add_parser("ui")
+    ui.add_argument("manifest", help="Path to rapp-herdr estate JSON")
+    ui.add_argument("--host", default="127.0.0.1")
+    ui.add_argument("--port", type=int, default=8765)
+    ui.add_argument("--open", action="store_true")
 
     twin = commands.add_parser("_twin", help=argparse.SUPPRESS)
     twin.add_argument("--workspace", required=True)
@@ -71,6 +95,15 @@ def _parser() -> argparse.ArgumentParser:
     twin.add_argument("--entrypoint", required=True)
     twin.add_argument("--launch-nonce", required=True)
     twin.add_argument("--herdr", required=True)
+
+    estate_device = commands.add_parser("_estate-device", help=argparse.SUPPRESS)
+    estate_device.add_argument("action", choices=["up", "status", "down"])
+    estate_device.add_argument("--payload", required=True)
+
+    cell = commands.add_parser("_cell", help=argparse.SUPPRESS)
+    cell_payload = cell.add_mutually_exclusive_group(required=True)
+    cell_payload.add_argument("--payload")
+    cell_payload.add_argument("--payload-file")
     return parser
 
 
@@ -101,6 +134,27 @@ def main(argv: Sequence[str] | None = None) -> int:
                 launch_nonce=args.launch_nonce,
                 herdr_binary=args.herdr,
             )
+        if args.command == "_estate-device":
+            result = run_estate_device(
+                args.action,
+                decode_device_payload(args.payload),
+            )
+            _print(result)
+            return 0 if result.get("ok") else 1
+        if args.command == "_cell":
+            payload = (
+                decode_cell_payload(args.payload)
+                if args.payload
+                else load_cell_payload(args.payload_file)
+            )
+            return run_cell(payload)
+        if args.command == "estate":
+            estate = load_estate(args.manifest)
+            result = EstateManager(estate, ssh_binary=args.ssh).run(
+                args.estate_command
+            )
+            _print(result)
+            return 0 if result.get("ok") else 1
         if args.command == "doctor":
             client = HerdrClient(binary=args.herdr, session=args.session)
             context = client.context()
@@ -114,6 +168,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 }
             )
             return 0
+        if args.command == "ui":
+            return run_ui(
+                args.manifest,
+                host=args.host,
+                port=args.port,
+                open_browser=args.open,
+            )
 
         neighborhood = load_neighborhood(args.manifest, args.members)
         manager = _manager(args)

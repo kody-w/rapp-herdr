@@ -31,3 +31,6 @@ Issues = "https://github.com/kody-w/rapp-herdr/issues"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+rapp_herdr = ["*.html"]

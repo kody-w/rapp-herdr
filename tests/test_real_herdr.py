@@ -15,6 +15,7 @@ import uuid
 from pathlib import Path
 
 from tests.helpers import create_neighborhood, create_twin
+from tests.test_catalog import create_catalog
 
 
 def _request_json(url: str, payload: dict) -> tuple[int, dict]:
@@ -248,6 +249,124 @@ if __name__ == "__main__":
                 self.assertEqual(down.returncode, 0, down.stderr or down.stdout)
                 print(f"[e2e] neighborhood down: {time.monotonic() - phase_started:.2f}s")
                 self.assertEqual(json.loads(down.stdout)["state"], "down")
+
+                catalogs_root = root / "catalogs"
+                create_catalog(catalogs_root)
+                estate_manifest = root / "estate.json"
+                estate_manifest.write_text(
+                    json.dumps(
+                        {
+                            "schema": "rapp-herdr-estate/1.0",
+                            "name": "E2E Estate",
+                            "devices": [
+                                {
+                                    "id": "local",
+                                    "transport": "local",
+                                    "os": "posix",
+                                    "session": session,
+                                    "herdr_bin": herdr,
+                                    "rapp_herdr_bin": sys.executable,
+                                    "receipt_root": str(root / "catalog-state"),
+                                    "inventory_roots": [str(root / "empty-twins")],
+                                    "catalog_roots": [str(catalogs_root)],
+                                    "neighborhoods": [],
+                                }
+                            ],
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                estate_up = subprocess.run(
+                    [
+                        sys.executable,
+                        "-m",
+                        "rapp_herdr",
+                        "estate",
+                        "up",
+                        str(estate_manifest),
+                    ],
+                    capture_output=True,
+                    text=True,
+                    env=environment,
+                    timeout=60,
+                    check=False,
+                )
+                self.assertEqual(
+                    estate_up.returncode,
+                    0,
+                    estate_up.stderr or estate_up.stdout,
+                )
+                estate_agents = subprocess.run(
+                    [herdr, "--session", session, "agent", "list"],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                    check=True,
+                )
+                catalog_agents = json.loads(estate_agents.stdout)["result"]["agents"]
+                self.assertEqual(len(catalog_agents), 1)
+                self.assertEqual(catalog_agents[0]["agent"], "rapp-neighborhood")
+                catalog_pane = catalog_agents[0]["pane_id"]
+                try:
+                    subprocess.run(
+                        [
+                            herdr,
+                            "--session",
+                            session,
+                            "pane",
+                            "run",
+                            catalog_pane,
+                            "hello",
+                        ],
+                        capture_output=True,
+                        text=True,
+                        timeout=10,
+                        check=True,
+                    )
+                    waited = subprocess.run(
+                        [
+                            herdr,
+                            "--session",
+                            session,
+                            "pane",
+                            "wait-output",
+                            catalog_pane,
+                            "--match",
+                            "neighborhood:hello",
+                            "--timeout",
+                            "10000",
+                        ],
+                        capture_output=True,
+                        text=True,
+                        timeout=15,
+                        check=False,
+                    )
+                    self.assertEqual(
+                        waited.returncode,
+                        0,
+                        waited.stderr or waited.stdout,
+                    )
+                finally:
+                    estate_down = subprocess.run(
+                        [
+                            sys.executable,
+                            "-m",
+                            "rapp_herdr",
+                            "estate",
+                            "down",
+                            str(estate_manifest),
+                        ],
+                        capture_output=True,
+                        text=True,
+                        env=environment,
+                        timeout=30,
+                        check=False,
+                    )
+                self.assertEqual(
+                    estate_down.returncode,
+                    0,
+                    estate_down.stderr or estate_down.stdout,
+                )
         finally:
             subprocess.run(
                 [herdr, "--session", session, "server", "stop"],

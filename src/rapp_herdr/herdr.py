@@ -205,7 +205,7 @@ class HerdrClient:
         return value
 
     def read_pane(self, pane_id: str, lines: int = 80) -> str:
-        response = self._run(
+        return self._run(
             "pane",
             "read",
             pane_id,
@@ -215,13 +215,8 @@ class HerdrClient:
             str(lines),
             "--format",
             "text",
+            expect_json=False,
         )
-        result = response.get("result", {})
-        for key in ("text", "content", "output"):
-            value = result.get(key)
-            if isinstance(value, str):
-                return value
-        return json.dumps(result, sort_keys=True)
 
     def panes(self, workspace_id: str) -> tuple[dict[str, Any], ...]:
         response = self._run("pane", "list", "--workspace", workspace_id)

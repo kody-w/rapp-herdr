@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import threading
 import unittest
+import sys
 from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -215,6 +216,37 @@ class ManagerTests(unittest.TestCase):
                 manager.up(changed, base_port=7081)
 
             self.assertEqual(client.created_tabs, 3)
+
+    @patch("rapp_herdr.manager.NeighborhoodManager._health", return_value=True)
+    @patch("rapp_herdr.manager.allocate_ports", return_value=(7081, 7082, 7083, 7084))
+    @patch(
+        "rapp_herdr.manager.prepare_brainstem_python",
+        return_value=Path(sys.executable),
+    )
+    def test_existing_workspace_restarts_stopped_twin(
+        self, _prepare, _ports, _health
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            topology = self._topology(root)
+            client = FakeHerdr()
+            manager = NeighborhoodManager(client, ReceiptStore(root / "state"))
+            manager.up(topology, base_port=7081)
+            initial_runs = len(
+                [item for item in client.commands if item[0] == "run"]
+            )
+            client.pane_values["w1:p1"].pop("agent")
+
+            degraded = manager.status(topology.neighborhood)
+            restarted = manager.up(topology, base_port=7081)
+
+            self.assertEqual(degraded["state"], "degraded")
+            self.assertTrue(degraded["managed"])
+            self.assertEqual(restarted["state"], "running")
+            self.assertEqual(
+                len([item for item in client.commands if item[0] == "run"]),
+                initial_runs + 1,
+            )
 
     @patch("rapp_herdr.manager.NeighborhoodManager._health", return_value=True)
     @patch("rapp_herdr.manager.allocate_ports", return_value=(7081, 7082, 7083, 7084))
