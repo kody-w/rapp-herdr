@@ -301,6 +301,55 @@ class EstateTests(unittest.TestCase):
             self.assertEqual(buddy_actions, ["create", "handshake", "delete"])
             self.assertEqual(json.loads(path.read_text()), original)
 
+    def test_buddy_list_and_chat_present_real_probe_target(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            estate = load_estate(create_estate(Path(directory) / "estate.json"))
+            manager = EstateManager(estate, ssh_binary="/usr/bin/ssh")
+            status = {
+                "ok": True,
+                "devices": [{
+                    "device": "remote-mac",
+                    "neighborhoods": [{
+                        "result": {
+                            "members": [{
+                                "name": "Persistence Probe - remote-mac",
+                                "rappid": "rappid:@rapp/probe:" + "e" * 64,
+                                "url": "http://127.0.0.1:7199",
+                                "healthy": True,
+                                "live": True,
+                                "agent_status": "idle",
+                            }]
+                        }
+                    }],
+                }],
+            }
+            with patch.object(manager, "run", return_value=status):
+                listed = manager.list_buddies()
+            buddy = listed["buddies"][0]
+
+            self.assertEqual(buddy["name"], "Remote Twin")
+            self.assertEqual(buddy["presence"], "online")
+            self.assertTrue(buddy["via_probe"])
+
+            with patch.object(manager, "run", return_value=status), patch.object(
+                manager,
+                "_run_remote_buddy",
+                return_value={
+                    "ok": True,
+                    "response": "Remote Twin READY",
+                    "session_id": "remote-session",
+                    "responded_at": "2026-08-23T00:00:00Z",
+                },
+            ):
+                reply = manager.chat_buddy(
+                    buddy_id=buddy["id"],
+                    message="hello",
+                )
+
+            self.assertTrue(reply["ok"])
+            self.assertEqual(reply["buddy"]["status"], "ready")
+            self.assertEqual(reply["response"], "Remote Twin READY")
+
     def test_unsafe_ssh_alias_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = create_estate(Path(directory) / "estate.json")

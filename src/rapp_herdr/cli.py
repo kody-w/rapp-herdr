@@ -103,6 +103,21 @@ def _parser() -> argparse.ArgumentParser:
     )
     estate_buddy_create.add_argument("--port-start", type=int, default=7200)
     estate_buddy_create.add_argument("--ssh", help="Path to the SSH binary")
+    estate_buddy_list = estate_buddy_commands.add_parser("list")
+    estate_buddy_list.add_argument(
+        "manifest",
+        help="Path to rapp-herdr estate JSON",
+    )
+    estate_buddy_list.add_argument("--ssh", help="Path to the SSH binary")
+    estate_buddy_chat = estate_buddy_commands.add_parser("chat")
+    estate_buddy_chat.add_argument(
+        "manifest",
+        help="Path to rapp-herdr estate JSON",
+    )
+    estate_buddy_chat.add_argument("--buddy", required=True)
+    estate_buddy_chat.add_argument("--message", required=True)
+    estate_buddy_chat.add_argument("--session-id")
+    estate_buddy_chat.add_argument("--ssh", help="Path to the SSH binary")
 
     doctor = commands.add_parser("doctor")
     doctor.add_argument("--session")
@@ -135,7 +150,10 @@ def _parser() -> argparse.ArgumentParser:
     probe_device.add_argument("--payload", required=True)
 
     buddy_device = commands.add_parser("_buddy-device", help=argparse.SUPPRESS)
-    buddy_device.add_argument("action", choices=["create", "handshake", "delete"])
+    buddy_device.add_argument(
+        "action",
+        choices=["create", "handshake", "delete", "chat"],
+    )
     buddy_device.add_argument("--payload", required=True)
 
     cell = commands.add_parser("_cell", help=argparse.SUPPRESS)
@@ -209,13 +227,22 @@ def main(argv: Sequence[str] | None = None) -> int:
                     base_port=args.base_port,
                 )
             elif args.estate_command == "buddy":
-                result = manager.create_buddy(
-                    device_id=args.device,
-                    name=args.name,
-                    role=args.role,
-                    ui=args.ui,
-                    port_start=args.port_start,
-                )
+                if args.buddy_action == "create":
+                    result = manager.create_buddy(
+                        device_id=args.device,
+                        name=args.name,
+                        role=args.role,
+                        ui=args.ui,
+                        port_start=args.port_start,
+                    )
+                elif args.buddy_action == "list":
+                    result = manager.list_buddies()
+                else:
+                    result = manager.chat_buddy(
+                        buddy_id=args.buddy,
+                        message=args.message,
+                        session_id=args.session_id,
+                    )
             else:
                 result = manager.run(args.estate_command)
             _print(result)

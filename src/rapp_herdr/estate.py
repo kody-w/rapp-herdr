@@ -17,6 +17,7 @@ from typing import Any
 from .audit import audit_machine
 from .buddy import (
     add_buddy_neighborhood,
+    buddy_chat_payload,
     buddy_cleanup_payload,
     buddy_handshake_payload,
     buddy_payload,
@@ -1536,6 +1537,7 @@ class EstateManager:
                         "could not stop the created buddy; resources preserved"
                     )
                     return result
+
         if registered is not None:
             try:
                 from .buddy import remove_buddy_neighborhood
@@ -1570,3 +1572,149 @@ class EstateManager:
             result["ok"] = False
             result["error"] = f"cannot delete buddy resources: {exc}"
         return result
+
+    def _buddy_records(self) -> list[dict[str, Any]]:
+        status = self.run("status")
+        devices = {
+            device.id: device for device in self.estate.devices
+        }
+        candidates: list[dict[str, Any]] = []
+        for observed in status.get("devices", []):
+            if not isinstance(observed, dict):
+                continue
+            device_id = observed.get("device")
+            device = devices.get(device_id)
+            if device is None:
+                continue
+            for neighborhood in observed.get("neighborhoods", []):
+                result = (
+                    neighborhood.get("result")
+                    if isinstance(neighborhood, dict)
+                    else None
+                )
+                if not isinstance(result, dict):
+                    continue
+                for member in result.get("members", []):
+                    if not isinstance(member, dict):
+                        continue
+                    url = member.get("url")
+                    if not isinstance(url, str):
+                        continue
+                    is_probe = str(member.get("name") or "").startswith(
+                        "Persistence Probe"
+                    )
+                    target = device.probe_target if is_probe else None
+                    name = target.name if target else member.get("name")
+                    rappid = target.rappid if target else member.get("rappid")
+                    identity = str(rappid or name or member.get("pane_id"))
+                    buddy_id = hashlib.sha256(
+                        f"{device_id}\0{identity}".encode()
+                    ).hexdigest()[:20]
+                    healthy = bool(
+                        member.get("healthy") and member.get("live")
+                    )
+                    candidates.append(
+                        {
+                            "id": buddy_id,
+                            "name": str(name or "RAPP Neighbor"),
+                            "device": device_id,
+                            "rappid": rappid,
+                            "presence": "online" if healthy else "offline",
+                            "status": "ready" if healthy else "offline",
+                            "herdr_status": member.get("agent_status"),
+                            "transport": (
+                                "local"
+                                if device.transport == "local"
+                                else "ssh-windows"
+                                if device.os == "windows"
+                                else "ssh-posix"
+                            ),
+                            "via_probe": is_probe,
+                            "_url": url,
+                            "_device": device,
+                        }
+                    )
+        selected: dict[str, dict[str, Any]] = {}
+        for candidate in sorted(
+            candidates,
+            key=lambda item: bool(item["via_probe"]),
+        ):
+            key = (
+                f"{candidate['device']}\0"
+                f"{candidate.get('rappid') or candidate['name']}"
+            )
+            selected.setdefault(key, candidate)
+        return list(selected.values())
+
+    @staticmethod
+    def _public_buddy(record: dict[str, Any]) -> dict[str, Any]:
+        return {
+            key: value for key, value in record.items()
+            if not key.startswith("_")
+        }
+
+    def list_buddies(self) -> dict[str, Any]:
+        buddies = [
+            self._public_buddy(record)
+            for record in self._buddy_records()
+        ]
+        buddies.sort(key=lambda item: (item["device"], item["name"]))
+        return {
+            "ok": True,
+            "schema": ESTATE_SCHEMA,
+            "estate": self.estate.name,
+            "action": "buddy-list",
+            "buddies": buddies,
+        }
+
+    def chat_buddy(
+        self,
+        *,
+        buddy_id: str,
+        message: str,
+        session_id: str | None = None,
+    ) -> dict[str, Any]:
+        matches = [
+            record for record in self._buddy_records()
+            if record["id"] == buddy_id
+        ]
+        if len(matches) != 1:
+            raise RappHerdrError("estate buddy is not uniquely available")
+        buddy = matches[0]
+        if buddy["presence"] != "online":
+            raise RappHerdrError("estate buddy is offline")
+        device = buddy["_device"]
+        payload = buddy_chat_payload(
+            device.id,
+            url=buddy["_url"],
+            message=message,
+            session_id=session_id,
+        )
+        result = (
+            self._run_local_buddy(device, "chat", payload)
+            if device.transport == "local"
+            else self._run_remote_buddy(device, "chat", payload)
+        )
+        if not result.get("ok"):
+            return {
+                "ok": False,
+                "schema": ESTATE_SCHEMA,
+                "estate": self.estate.name,
+                "action": "buddy-chat",
+                "buddy": self._public_buddy(buddy),
+                "error": result.get("error") or "buddy did not answer",
+            }
+        return {
+            "ok": True,
+            "schema": ESTATE_SCHEMA,
+            "estate": self.estate.name,
+            "action": "buddy-chat",
+            "buddy": {
+                **self._public_buddy(buddy),
+                "presence": "online",
+                "status": "ready",
+            },
+            "response": result["response"],
+            "session_id": result.get("session_id"),
+            "responded_at": result.get("responded_at"),
+        }

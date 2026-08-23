@@ -12,6 +12,7 @@ import socket
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 from pathlib import Path
@@ -175,6 +176,22 @@ def buddy_cleanup_payload(
         "manifest": manifest,
         "rappid": rappid,
         "identity_nonce": identity_nonce,
+    }
+
+
+def buddy_chat_payload(
+    device_id: str,
+    *,
+    url: str,
+    message: str,
+    session_id: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "schema": BUDDY_SCHEMA,
+        "device_id": device_id,
+        "url": url,
+        "message": message,
+        "session_id": session_id,
     }
 
 
@@ -616,6 +633,66 @@ def run_buddy_device(action: str, value: dict[str, Any]) -> dict[str, Any]:
             "device": expected["device_id"],
             "rappid": expected["rappid"],
             "deleted": True,
+        }
+    if action == "chat":
+        device_id = _required_text(
+            value.get("device_id"),
+            "buddy.device_id",
+            64,
+        )
+        url = _required_text(value.get("url"), "buddy.url", 240).rstrip("/")
+        parsed = urllib.parse.urlparse(url)
+        if (
+            parsed.scheme != "http"
+            or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}
+            or parsed.port is None
+            or parsed.path not in {"", "/"}
+        ):
+            raise RappHerdrError("buddy chat URL must be loopback HTTP")
+        message = _required_text(value.get("message"), "buddy.message", 8_000)
+        body = {
+            "schema": "rapp-chat/1.0",
+            "message": message,
+            "user_input": message,
+        }
+        if isinstance(value.get("session_id"), str) and value["session_id"]:
+            body["session_id"] = value["session_id"][:240]
+        request = urllib.request.Request(
+            url + "/chat",
+            data=json.dumps(body).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=180) as response:
+                chat = json.loads(response.read())
+        except (
+            OSError,
+            urllib.error.URLError,
+            json.JSONDecodeError,
+        ) as exc:
+            raise RappHerdrError(
+                f"buddy chat failed: {type(exc).__name__}"
+            ) from exc
+        text = (
+            chat.get("response")
+            or chat.get("content")
+            or chat.get("assistant_response")
+            if isinstance(chat, dict)
+            else None
+        )
+        if not isinstance(text, str) or not text.strip():
+            raise RappHerdrError("buddy chat returned no response")
+        return {
+            "ok": True,
+            "schema": BUDDY_SCHEMA,
+            "device": device_id,
+            "response": text.strip(),
+            "session_id": chat.get("session_id"),
+            "responded_at": time.strftime(
+                "%Y-%m-%dT%H:%M:%SZ",
+                time.gmtime(),
+            ),
         }
     raise RappHerdrError(f"unsupported buddy action: {action}")
 
