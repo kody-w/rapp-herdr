@@ -413,7 +413,7 @@ class NeighborhoodManager:
             "launch": {
                 "python": str(python),
                 "configured_python": (
-                    str(Path(configured_python).expanduser().resolve())
+                    str(Path(configured_python).expanduser().absolute())
                     if configured_python
                     else None
                 ),
@@ -472,7 +472,7 @@ class NeighborhoodManager:
             if isinstance(member, dict)
         ]
         configured = (
-            str(Path(brainstem_python).expanduser().resolve())
+            str(Path(brainstem_python).expanduser().absolute())
             if brainstem_python
             else None
         )

@@ -162,7 +162,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "_twin":
             return supervise(
                 workspace=Path(args.workspace).expanduser().resolve(),
-                python=Path(args.python).expanduser().resolve(),
+                python=Path(args.python).expanduser().absolute(),
                 port=args.port,
                 name=args.name,
                 rappid=args.rappid,
