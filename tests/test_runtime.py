@@ -51,6 +51,28 @@ class RuntimePreparationTests(unittest.TestCase):
         self.assertIn("a" * 32, str(first))
         self.assertIn("b" * 32, str(second))
 
+    def test_configured_venv_python_preserves_symlink_path(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            topology, _workspace = self._topology(root)
+            python = root / "venv" / "bin" / "python"
+            python.parent.mkdir(parents=True)
+            python.symlink_to(sys.executable)
+
+            with patch(
+                "rapp_herdr.manager._prepare_brainstem_python_locked",
+                return_value=python.absolute(),
+            ) as prepare:
+                result = prepare_brainstem_python(
+                    topology,
+                    configured_python=python,
+                    bootstrap=False,
+                )
+
+            self.assertEqual(result, python.absolute())
+            self.assertEqual(prepare.call_args.args[0], python.absolute())
+            self.assertNotEqual(prepare.call_args.args[0], python.resolve())
+
     def test_included_requirements_are_rejected_before_environment_sharing(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             requirements = Path(directory) / "requirements.txt"
@@ -133,7 +155,7 @@ class RuntimePreparationTests(unittest.TestCase):
                 bootstrap=True,
             )
 
-            self.assertEqual(selected, python.resolve())
+            self.assertEqual(selected, python.absolute())
             command = run.call_args.args[0]
             self.assertEqual(command[1:4], ["-m", "pip", "install"])
             self.assertIn("-r", command)

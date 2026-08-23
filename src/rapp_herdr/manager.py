@@ -183,7 +183,7 @@ def prepare_brainstem_python(
     requirements_fingerprint = next(iter(fingerprints), "base")
     requirements = next(iter(fingerprints.values()), None)
     if configured_python:
-        python = Path(configured_python).expanduser().resolve()
+        python = Path(configured_python).expanduser().absolute()
         if not python.is_file():
             raise RappHerdrError(
                 f"configured RAPP brainstem Python does not exist: {python}"
