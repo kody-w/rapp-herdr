@@ -188,7 +188,10 @@ class EstateTests(unittest.TestCase):
             self.assertEqual(result["session"], "running")
             self.assertEqual(result["neighborhoods"], [])
             self.assertEqual(result["inventory"]["total"], 0)
-            start.assert_called_once_with("/opt/herdr", "rapp-estate")
+            start.assert_called_once_with(
+                str(Path("/opt/herdr").expanduser()),
+                "rapp-estate",
+            )
 
 
 if __name__ == "__main__":
