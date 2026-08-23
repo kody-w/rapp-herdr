@@ -1,6 +1,7 @@
 {
   "schema": "rapp-herdr-estate/1.0",
   "name": "My Local AI Estate",
+  "buddy_owner": "example-operator",
   "devices": [
     {
       "id": "local",
@@ -19,6 +20,11 @@
       "audit_roots": [
         "~/.brainstem/twins"
       ],
+      "probe_target": {
+        "name": "Local Manager Twin",
+        "url": "http://127.0.0.1:7085",
+        "rappid": "rappid:@example-operator/local-manager:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
       "neighborhoods": [
         {
           "manifest": "~/.rapp/neighborhoods/NEIGHBORHOOD_ID/neighborhood.json",

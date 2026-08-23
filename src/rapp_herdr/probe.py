@@ -8,7 +8,9 @@ import re
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -25,14 +27,16 @@ PROBE_NEIGHBORHOOD_MANIFEST = (
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 _BRAINSTEM = r'''from __future__ import annotations
-import json, os, threading, time
+import contextlib, hashlib, json, os, threading, time, urllib.error, urllib.request
 from pathlib import Path
 from flask import Flask, jsonify, request
 
 app = Flask(__name__)
 state_path = Path(".brainstem_data") / "persistence_probe.json"
+file_lock_path = state_path.with_suffix(".lock")
 state_path.parent.mkdir(parents=True, exist_ok=True)
 state_lock = threading.Lock()
+relay_lock = threading.Lock()
 
 def read_state():
     return json.loads(state_path.read_text(encoding="utf-8"))
@@ -43,7 +47,29 @@ def write_state(value):
     os.chmod(temporary, 0o600)
     os.replace(temporary, state_path)
 
-with state_lock:
+@contextlib.contextmanager
+def state_file_lock(timeout=10):
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            file_lock_path.mkdir()
+            break
+        except FileExistsError:
+            try:
+                if time.time() - file_lock_path.stat().st_mtime > 300:
+                    file_lock_path.rmdir()
+                    continue
+            except OSError:
+                pass
+            if time.monotonic() >= deadline:
+                raise TimeoutError("probe state lock timed out")
+            time.sleep(0.05)
+    try:
+        yield
+    finally:
+        file_lock_path.rmdir()
+
+with relay_lock, state_file_lock(), state_lock:
     startup = read_state()
     startup["boot_count"] = int(startup.get("boot_count", 0)) + 1
     startup["last_started_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -51,9 +77,32 @@ with state_lock:
 
 @app.get("/health")
 def health():
-    with state_lock:
+    with state_file_lock(), state_lock:
         state = read_state()
     return jsonify({"status": "ok", "service": "rapp-herdr-persistence-probe", "probe": state})
+
+def relay_turn(target, user_input, session_id):
+    body = {
+        "schema": "rapp-chat/1.0",
+        "message": user_input,
+        "user_input": user_input,
+    }
+    if session_id:
+        body["session_id"] = session_id
+    relay_request = urllib.request.Request(
+        target["url"] + "/chat",
+        data=json.dumps(body).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(relay_request, timeout=180) as response:
+        value = json.loads(response.read())
+    if not isinstance(value, dict):
+        raise ValueError("target returned a non-object response")
+    text = value.get("response") or value.get("content") or value.get("assistant_response")
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError("target returned no response text")
+    return text.strip(), value.get("session_id")
 
 @app.post("/chat")
 def chat():
@@ -61,14 +110,93 @@ def chat():
     user_input = str(body.get("user_input") or "").strip()
     if not user_input:
         return jsonify({"error": "user_input is required"}), 400
-    with state_lock:
+    recorded_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    with state_file_lock(), state_lock:
         state = read_state()
+        target = state.get("relay_target")
+        if not isinstance(target, dict):
+            return jsonify({"error": "probe relay target is not configured", "probe": state}), 503
         messages = list(state.get("messages", []))
-        messages.append({"content": user_input, "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())})
+        message_count = int(state.get("message_count", 0)) + 1
+        relay_id = "%s-%s-%s" % (state.get("device_id"), message_count, time.time_ns())
+        messages.append({"content": user_input, "recorded_at": recorded_at, "relay_id": relay_id})
         state["messages"] = messages[-100:]
-        state["message_count"] = int(state.get("message_count", 0)) + 1
+        state["message_count"] = message_count
         write_state(state)
-    return jsonify({"response": "Persistence marker stored locally.", "session_id": "persistence-probe", "agent_logs": "persistence-probe", "probe": state})
+    sent_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    with relay_lock:
+        with state_file_lock(), state_lock:
+            state = read_state()
+            target = state["relay_target"]
+            target_revision = int(state.get("target_revision", 0))
+            target_session_id = state.get("target_session_id")
+        try:
+            response_text, target_session_id = relay_turn(
+                target,
+                user_input,
+                target_session_id,
+            )
+            receipt = {
+                "relay_id": relay_id,
+                "target_name": target["name"],
+                "configured_target_rappid": target.get("rappid"),
+                "sent_at": sent_at,
+                "received_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "responded": True,
+                "response_sha256": hashlib.sha256(response_text.encode()).hexdigest(),
+            }
+            with state_file_lock(), state_lock:
+                state = read_state()
+                if (
+                    int(state.get("target_revision", 0)) != target_revision
+                    or state.get("relay_target") != target
+                ):
+                    return jsonify({
+                        "error": "probe relay target changed during chat",
+                        "relay": dict(receipt, responded=False, stale_target=True),
+                        "probe": state,
+                    }), 409
+                state["target_session_id"] = target_session_id
+                state["relay_count"] = int(state.get("relay_count", 0)) + 1
+                state["last_relay"] = receipt
+                relays = list(state.get("relays", []))
+                relays.append(receipt)
+                state["relays"] = relays[-50:]
+                write_state(state)
+            return jsonify({
+                "response": response_text,
+                "session_id": target_session_id or "persistence-probe-relay",
+                "agent_logs": "persistence-probe->%s" % target["name"],
+                "probe": state,
+                "relay": receipt,
+            })
+        except (OSError, ValueError, urllib.error.URLError, json.JSONDecodeError) as exc:
+            receipt = {
+                "relay_id": relay_id,
+                "target_name": target["name"],
+                "configured_target_rappid": target.get("rappid"),
+                "sent_at": sent_at,
+                "received_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "responded": False,
+                "error": type(exc).__name__,
+            }
+            with state_file_lock(), state_lock:
+                state = read_state()
+                if (
+                    int(state.get("target_revision", 0)) != target_revision
+                    or state.get("relay_target") != target
+                ):
+                    return jsonify({
+                        "error": "probe relay target changed during chat",
+                        "relay": dict(receipt, stale_target=True),
+                        "probe": state,
+                    }), 409
+                state["last_relay"] = receipt
+                relays = list(state.get("relays", []))
+                relays.append(receipt)
+                state["relays"] = relays[-50:]
+                write_state(state)
+            return jsonify({"error": "local Twin relay failed", "relay": receipt, "probe": state}), 502
 
 if __name__ == "__main__":
     app.run(host="127.0.0.1", port=int(os.environ.get("PORT", "7199")), use_reloader=False)
@@ -81,6 +209,39 @@ def _required_text(value: Any, field: str) -> str:
     if any(character in value for character in ("\0", "\n", "\r")):
         raise RappHerdrError(f"{field} contains an unsafe control character")
     return value.strip()
+
+
+def _relay_target(value: dict[str, Any], base_port: int) -> dict[str, Any]:
+    raw = value.get("relay_target")
+    if not isinstance(raw, dict):
+        raise RappHerdrError(
+            "probe.relay_target must identify a real local Twin"
+        )
+    name = _required_text(raw.get("name"), "probe.relay_target.name")
+    url = _required_text(raw.get("url"), "probe.relay_target.url").rstrip("/")
+    parsed = urllib.parse.urlparse(url)
+    if (
+        parsed.scheme != "http"
+        or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+        or parsed.port is None
+        or not 1 <= parsed.port <= 65535
+        or parsed.port == base_port
+    ):
+        raise RappHerdrError(
+            "probe.relay_target.url must be a different loopback HTTP port"
+        )
+    return {
+        "name": name,
+        "url": url,
+        "rappid": (
+            _required_text(raw.get("rappid"), "probe.relay_target.rappid")
+            if raw.get("rappid") is not None
+            else None
+        ),
+    }
 
 
 def probe_rappid(device_id: str) -> str:
@@ -104,6 +265,7 @@ def probe_payload(
     *,
     base_port: int,
     message: str | None = None,
+    relay_target: dict[str, Any] | None = None,
     neighborhood_manifest: str = PROBE_NEIGHBORHOOD_MANIFEST,
 ) -> dict[str, Any]:
     return {
@@ -114,6 +276,7 @@ def probe_payload(
         "rappid": probe_rappid(device_id),
         "base_port": base_port,
         "message": message,
+        "relay_target": relay_target,
     }
 
 
@@ -159,6 +322,38 @@ def _write_json(path: Path, value: dict[str, Any]) -> None:
     )
 
 
+@contextmanager
+def _probe_state_lock(state_path: Path, timeout: float = 10) -> Any:
+    lock_path = state_path.with_suffix(".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            lock_path.mkdir()
+            break
+        except FileExistsError:
+            try:
+                if time.time() - lock_path.stat().st_mtime > 300:
+                    lock_path.rmdir()
+                    continue
+            except OSError:
+                pass
+            if time.monotonic() >= deadline:
+                raise RappHerdrError(
+                    f"persistence probe state lock timed out: {lock_path}"
+                )
+            time.sleep(0.05)
+    try:
+        yield
+    finally:
+        try:
+            lock_path.rmdir()
+        except OSError as exc:
+            raise RappHerdrError(
+                f"cannot release persistence probe state lock: {lock_path}"
+            ) from exc
+
+
 def _paths(value: dict[str, Any]) -> tuple[str, str, Path, Path, int]:
     if value.get("schema") != PROBE_SCHEMA:
         raise RappHerdrError(f"probe payload must use schema {PROBE_SCHEMA!r}")
@@ -190,6 +385,7 @@ def _paths(value: dict[str, Any]) -> tuple[str, str, Path, Path, int]:
 
 def _seed(value: dict[str, Any]) -> dict[str, Any]:
     device_id, rappid, workspace, manifest, base_port = _paths(value)
+    relay_target = _relay_target(value, base_port)
     marker_path = workspace / ".rapp-herdr-probe.json"
     marker = {"schema": PROBE_SCHEMA, "device_id": device_id, "rappid": rappid}
     if workspace.exists() and not marker_path.is_file():
@@ -222,17 +418,24 @@ def _seed(value: dict[str, Any]) -> dict[str, Any]:
         (
             f"# Persistence Probe - {device_id}\n\n"
             "A bounded local Twin used only to prove identity and memory "
-            "survive runtime restarts.\n"
+            "survive runtime restarts by relaying every chat turn to a "
+            "designated real local Twin on this device.\n"
         ).encode(),
     )
     _atomic_write(workspace / "brainstem.py", _BRAINSTEM.encode())
     (workspace / "requirements.txt").unlink(missing_ok=True)
     (workspace / "agents").mkdir(exist_ok=True, mode=0o700)
     state_path = workspace / ".brainstem_data" / "persistence_probe.json"
-    if not state_path.is_file():
-        _write_json(
-            state_path,
-            {
+    with _probe_state_lock(state_path):
+        if state_path.is_file():
+            try:
+                state = json.loads(state_path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+                raise RappHerdrError(f"invalid probe state {state_path}: {exc}") from exc
+            if state.get("device_id") != device_id or state.get("rappid") != rappid:
+                raise RappHerdrError("existing probe state identity diverged")
+        else:
+            state = {
                 "schema": PROBE_SCHEMA,
                 "device_id": device_id,
                 "rappid": rappid,
@@ -243,8 +446,16 @@ def _seed(value: dict[str, Any]) -> dict[str, Any]:
                 "boot_count": 0,
                 "message_count": 0,
                 "messages": [],
-            },
-        )
+                "relay_count": 0,
+                "relays": [],
+                "target_revision": 0,
+            }
+        if state.get("relay_target") != relay_target:
+            state.pop("target_session_id", None)
+            state.pop("last_relay", None)
+            state["target_revision"] = int(state.get("target_revision", 0)) + 1
+        state["relay_target"] = relay_target
+        _write_json(state_path, state)
     neighborhood_value = {
         "schema": "rapp-neighborhood/1.0",
         "name": "rapp-herdr-persistence-probe",
@@ -299,6 +510,7 @@ def _seed(value: dict[str, Any]) -> dict[str, Any]:
         "manifest": str(manifest),
         "rappid": rappid,
         "port": base_port,
+        "relay_target": relay_target,
         "state": json.loads(state_path.read_text(encoding="utf-8")),
     }
 
@@ -308,6 +520,7 @@ def _request_json(
     *,
     method: str = "GET",
     body: dict[str, Any] | None = None,
+    timeout: float = 5,
 ) -> dict[str, Any]:
     data = json.dumps(body).encode() if body is not None else None
     request = urllib.request.Request(
@@ -317,8 +530,24 @@ def _request_json(
         headers={"Content-Type": "application/json"} if data else {},
     )
     try:
-        with urllib.request.urlopen(request, timeout=5) as response:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
             value = json.loads(response.read())
+    except urllib.error.HTTPError as exc:
+        try:
+            payload = exc.read()
+        finally:
+            exc.close()
+        try:
+            value = json.loads(payload)
+        except (UnicodeError, json.JSONDecodeError) as decode_exc:
+            raise RappHerdrError(
+                f"persistence probe returned HTTP {exc.code} with invalid JSON"
+            ) from decode_exc
+        if not isinstance(value, dict):
+            raise RappHerdrError(
+                f"persistence probe returned HTTP {exc.code} with an invalid response"
+            )
+        value["_http_status"] = int(exc.code)
     except (OSError, urllib.error.URLError, json.JSONDecodeError) as exc:
         raise RappHerdrError(
             f"persistence probe is not reachable at {url}: {exc}"
@@ -337,6 +566,7 @@ def _observe(value: dict[str, Any], *, mark: bool) -> dict[str, Any]:
             body={
                 "user_input": _required_text(value.get("message"), "probe.message")
             },
+            timeout=190,
         )
         if mark
         else _request_json(f"http://127.0.0.1:{base_port}/health")
@@ -347,19 +577,47 @@ def _observe(value: dict[str, Any], *, mark: bool) -> dict[str, Any]:
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise RappHerdrError(f"cannot read probe state {state_path}: {exc}") from exc
     remote_state = response.get("probe")
+    relay_target = _relay_target(value, base_port)
+    relay = (
+        response.get("relay")
+        if mark
+        else (
+            remote_state.get("last_relay")
+            if isinstance(remote_state, dict)
+            else None
+        )
+    )
     if (
         state.get("rappid") != rappid
         or state.get("device_id") != device_id
         or not isinstance(remote_state, dict)
         or remote_state.get("survival_marker") != state.get("survival_marker")
+        or remote_state.get("relay_target") != relay_target
     ):
         raise RappHerdrError("persistence probe state identity diverged")
+    if (
+        not isinstance(relay, dict)
+        or relay.get("responded") is not True
+        or relay.get("target_name") != relay_target["name"]
+        or relay.get("configured_target_rappid") != relay_target["rappid"]
+    ):
+        return {
+            "ok": False,
+            "device": device_id,
+            "rappid": rappid,
+            "port": base_port,
+            "state": state,
+            "relay": relay,
+            "error": "persistence probe did not receive a local Twin reply",
+            "reachable": True,
+        }
     return {
         "ok": True,
         "device": device_id,
         "rappid": rappid,
         "port": base_port,
         "state": state,
+        "relay": relay,
     }
 
 
@@ -369,7 +627,7 @@ def run_probe_device(action: str, value: dict[str, Any]) -> dict[str, Any]:
     if action == "mark":
         return _observe(value, mark=True)
     if action == "verify":
-        return _observe(value, mark=False)
+        return _observe(value, mark=True)
     raise RappHerdrError(f"unsupported persistence probe action: {action}")
 
 

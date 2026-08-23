@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 import re
@@ -14,6 +15,14 @@ from pathlib import Path
 from typing import Any
 
 from .audit import audit_machine
+from .buddy import (
+    add_buddy_neighborhood,
+    buddy_cleanup_payload,
+    buddy_handshake_payload,
+    buddy_payload,
+    encode_buddy_payload,
+    run_buddy_device,
+)
 from .catalog import CatalogManager, discover_catalogs
 from .herdr import HerdrClient
 from .manager import NeighborhoodManager, _powershell_command
@@ -30,6 +39,10 @@ from .receipts import ReceiptStore
 
 ESTATE_SCHEMA = "rapp-herdr-estate/1.0"
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+_RAPP_OWNER = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+_LOOPBACK_URL = re.compile(
+    r"^http://(?:127\.0\.0\.1|localhost|\[::1\]):([0-9]{1,5})/?$"
+)
 
 
 def _required_text(value: Any, field: str) -> str:
@@ -92,6 +105,20 @@ class EstateNeighborhood:
 
 
 @dataclass(frozen=True)
+class EstateProbeTarget:
+    name: str
+    url: str
+    rappid: str | None
+
+    def payload(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "url": self.url,
+            "rappid": self.rappid,
+        }
+
+
+@dataclass(frozen=True)
 class EstateDevice:
     id: str
     enabled: bool
@@ -106,6 +133,7 @@ class EstateDevice:
     catalog_roots: tuple[str, ...]
     audit_roots: tuple[str, ...]
     neighborhoods: tuple[EstateNeighborhood, ...]
+    probe_target: EstateProbeTarget | None
     note: str | None
 
     def payload(self) -> dict[str, Any]:
@@ -120,12 +148,16 @@ class EstateDevice:
             "neighborhoods": [
                 neighborhood.payload() for neighborhood in self.neighborhoods
             ],
+            "probe_target": (
+                self.probe_target.payload() if self.probe_target else None
+            ),
         }
 
 
 @dataclass(frozen=True)
 class Estate:
     name: str
+    buddy_owner: str | None
     manifest_path: Path
     devices: tuple[EstateDevice, ...]
 
@@ -138,6 +170,16 @@ def load_estate(path: str | Path) -> Estate:
             f"{manifest_path}: expected schema {ESTATE_SCHEMA!r}"
         )
     name = _required_text(value.get("name"), "estate.name")
+    raw_buddy_owner = value.get("buddy_owner")
+    buddy_owner = (
+        _required_text(raw_buddy_owner, "estate.buddy_owner")
+        if raw_buddy_owner is not None
+        else None
+    )
+    if buddy_owner is not None and (
+        len(buddy_owner) > 39 or not _RAPP_OWNER.fullmatch(buddy_owner)
+    ):
+        raise RappHerdrError("estate.buddy_owner is not a canonical RAPP/1 owner")
     raw_devices = value.get("devices")
     if not isinstance(raw_devices, list) or not raw_devices:
         raise RappHerdrError("estate.devices must be a non-empty array")
@@ -240,6 +282,38 @@ def load_estate(path: str | Path) -> Estate:
                     ),
                 )
             )
+        probe_target = None
+        raw_probe_target = raw.get("probe_target")
+        if raw_probe_target is not None:
+            if not isinstance(raw_probe_target, dict):
+                raise RappHerdrError(
+                    f"estate.devices[{index}].probe_target must be an object"
+                )
+            target_url = _required_text(
+                raw_probe_target.get("url"),
+                f"estate.devices[{index}].probe_target.url",
+            )
+            target_match = _LOOPBACK_URL.fullmatch(target_url)
+            if not target_match or not 1 <= int(target_match.group(1)) <= 65535:
+                raise RappHerdrError(
+                    f"estate.devices[{index}].probe_target.url must be a "
+                    "loopback HTTP URL with an explicit port"
+                )
+            probe_target = EstateProbeTarget(
+                name=_required_text(
+                    raw_probe_target.get("name"),
+                    f"estate.devices[{index}].probe_target.name",
+                ),
+                url=target_url.rstrip("/"),
+                rappid=(
+                    _required_text(
+                        raw_probe_target.get("rappid"),
+                        f"estate.devices[{index}].probe_target.rappid",
+                    )
+                    if raw_probe_target.get("rappid") is not None
+                    else None
+                ),
+            )
         devices.append(
             EstateDevice(
                 id=device_id,
@@ -278,6 +352,7 @@ def load_estate(path: str | Path) -> Estate:
                     f"estate.devices[{index}].audit_roots",
                 ),
                 neighborhoods=tuple(neighborhoods),
+                probe_target=probe_target,
                 note=(
                     _required_text(raw.get("note"), f"estate.devices[{index}].note")
                     if raw.get("note") is not None
@@ -287,7 +362,12 @@ def load_estate(path: str | Path) -> Estate:
         )
     if local_count > 1:
         raise RappHerdrError("an estate can declare at most one local device")
-    return Estate(name=name, manifest_path=manifest_path, devices=tuple(devices))
+    return Estate(
+        name=name,
+        buddy_owner=buddy_owner,
+        manifest_path=manifest_path,
+        devices=tuple(devices),
+    )
 
 
 def _start_herdr_session(binary: str, session: str) -> HerdrClient:
@@ -663,12 +743,14 @@ class EstateManager:
         self.estate = estate
         self.ssh_binary = ssh_binary or shutil.which("ssh")
         self.timeout = timeout
+        self.controller_receipts = ReceiptStore()
 
     def plan(self) -> dict[str, Any]:
         return {
             "ok": True,
             "schema": ESTATE_SCHEMA,
             "estate": self.estate.name,
+            "buddy_owner": self.estate.buddy_owner,
             "devices": [
                 {
                     "id": device.id,
@@ -685,6 +767,11 @@ class EstateManager:
                         neighborhood.payload()
                         for neighborhood in device.neighborhoods
                     ],
+                    "probe_target": (
+                        device.probe_target.payload()
+                        if device.probe_target
+                        else None
+                    ),
                     "note": device.note,
                 }
                 for device in self.estate.devices
@@ -711,21 +798,30 @@ class EstateManager:
             if device.os == "windows"
             else shlex.join(arguments)
         )
-        result = subprocess.run(
-            [
-                self.ssh_binary,
-                "-o",
-                "BatchMode=yes",
-                "-o",
-                "ConnectTimeout=8",
-                device.ssh or "",
-                command,
-            ],
-            capture_output=True,
-            text=True,
-            timeout=self.timeout,
-            check=False,
-        )
+        try:
+            result = subprocess.run(
+                [
+                    self.ssh_binary,
+                    "-o",
+                    "BatchMode=yes",
+                    "-o",
+                    "ConnectTimeout=8",
+                    device.ssh or "",
+                    command,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=self.timeout,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            return {
+                "ok": False,
+                "device": device.id,
+                "reachable": True,
+                "indeterminate": True,
+                "error": "remote estate lifecycle timed out",
+            }
         try:
             value = json.loads(result.stdout)
         except json.JSONDecodeError:
@@ -778,6 +874,11 @@ class EstateManager:
                     device.inventory_roots[0],
                     base_port=base_port,
                     message=message,
+                    relay_target=(
+                        device.probe_target.payload()
+                        if device.probe_target
+                        else None
+                    ),
                 )
             ),
         ]
@@ -820,6 +921,84 @@ class EstateManager:
         value["reachable"] = True
         return value
 
+    def _run_remote_buddy(
+        self,
+        device: EstateDevice,
+        action: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        if not self.ssh_binary:
+            return {
+                "ok": False,
+                "device": device.id,
+                "reachable": False,
+                "error": "ssh is not installed",
+            }
+        arguments = [
+            device.rapp_herdr_bin,
+            "_buddy-device",
+            action,
+            "--payload",
+            encode_buddy_payload(payload),
+        ]
+        command = (
+            _powershell_command(arguments)
+            if device.os == "windows"
+            else shlex.join(arguments)
+        )
+        try:
+            result = subprocess.run(
+                [
+                    self.ssh_binary,
+                    "-o",
+                    "BatchMode=yes",
+                    "-o",
+                    "ConnectTimeout=8",
+                    device.ssh or "",
+                    command,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=max(self.timeout, 240),
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            return {
+                "ok": False,
+                "device": device.id,
+                "reachable": True,
+                "indeterminate": True,
+                "error": "remote buddy operation timed out",
+            }
+        try:
+            value = json.loads(result.stdout)
+        except json.JSONDecodeError:
+            return {
+                "ok": False,
+                "device": device.id,
+                "reachable": result.returncode != 255,
+                "error": "remote buddy operation returned non-JSON output",
+            }
+        if not isinstance(value, dict):
+            return {
+                "ok": False,
+                "device": device.id,
+                "reachable": True,
+                "error": "remote buddy operation returned an invalid result",
+            }
+        value["reachable"] = True
+        return value
+
+    @staticmethod
+    def _run_local_buddy(
+        device: EstateDevice,
+        action: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        value = run_buddy_device(action, payload)
+        value["reachable"] = True
+        return value
+
     @staticmethod
     def _run_local_probe(
         device: EstateDevice,
@@ -835,6 +1014,11 @@ class EstateManager:
                 device.inventory_roots[0],
                 base_port=base_port,
                 message=message,
+                relay_target=(
+                    device.probe_target.payload()
+                    if device.probe_target
+                    else None
+                ),
             ),
         )
         value["reachable"] = True
@@ -963,9 +1147,9 @@ class EstateManager:
         if not 1 <= base_port <= 65535:
             raise RappHerdrError("probe base port must be from 1 to 65535")
         message = (
-            "persistence-check-"
+            f"persistence-{action}-"
             + time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
-            if action == "mark"
+            if action in {"mark", "verify"}
             else None
         )
         results_by_id: dict[str, dict[str, Any]] = {}
@@ -1039,3 +1223,350 @@ class EstateManager:
             "manifest_update": manifest_update,
             "devices": results,
         }
+
+    def create_buddy(
+        self,
+        *,
+        device_id: str,
+        name: str,
+        role: str,
+        ui: str = "auto",
+        port_start: int = 7200,
+    ) -> dict[str, Any]:
+        lock_digest = hashlib.sha256(
+            str(self.estate.manifest_path).encode()
+        ).hexdigest()[:32]
+        lock_path = (
+            self.controller_receipts.root
+            / "estate-buddies"
+            / f"{lock_digest}.json"
+        )
+        with self.controller_receipts.operation_lock(
+            lock_path,
+            wait_timeout=5,
+        ):
+            return self._create_buddy_locked(
+                device_id=device_id,
+                name=name,
+                role=role,
+                ui=ui,
+                port_start=port_start,
+            )
+
+    def _create_buddy_locked(
+        self,
+        *,
+        device_id: str,
+        name: str,
+        role: str,
+        ui: str,
+        port_start: int,
+    ) -> dict[str, Any]:
+        matches = [
+            device
+            for device in self.estate.devices
+            if device.id == device_id and device.enabled
+        ]
+        if len(matches) != 1:
+            raise RappHerdrError(
+                f"enabled estate device {device_id!r} is not unique"
+            )
+        device = matches[0]
+        owner = self.estate.buddy_owner
+        if owner is None:
+            raise RappHerdrError(
+                "estate.buddy_owner is required to mint a buddy"
+            )
+        payload = buddy_payload(
+            device.id,
+            device.inventory_roots[0],
+            owner=owner,
+            name=name,
+            role=role,
+            ui=ui,
+            port_start=port_start,
+        )
+        runner = (
+            self._run_local_buddy
+            if device.transport == "local"
+            else self._run_remote_buddy
+        )
+        initial_manifest_hash = hashlib.sha256(
+            self.estate.manifest_path.read_bytes()
+        ).hexdigest()
+        created = runner(device, "create", payload)
+        if not created.get("ok"):
+            return {
+                "ok": False,
+                "schema": ESTATE_SCHEMA,
+                "estate": self.estate.name,
+                "action": "buddy-create",
+                "device": device.id,
+                "created": created,
+            }
+        if hashlib.sha256(
+            self.estate.manifest_path.read_bytes()
+        ).hexdigest() != initial_manifest_hash:
+            rollback = self._rollback_buddy(
+                device,
+                runner,
+                created,
+                registered=None,
+                updated_device=None,
+            )
+            return {
+                "ok": False,
+                "schema": ESTATE_SCHEMA,
+                "estate": self.estate.name,
+                "action": "buddy-create",
+                "device": device.id,
+                "created": created,
+                "error": "estate manifest changed during buddy creation",
+                "rollback": rollback,
+            }
+        try:
+            registered = add_buddy_neighborhood(
+                self.estate.manifest_path,
+                device.id,
+                created["neighborhood"],
+                expected_hash=initial_manifest_hash,
+            )
+        except (OSError, RappHerdrError) as exc:
+            rollback = self._rollback_buddy(
+                device,
+                runner,
+                created,
+                registered=None,
+                updated_device=None,
+            )
+            return {
+                "ok": False,
+                "schema": ESTATE_SCHEMA,
+                "estate": self.estate.name,
+                "action": "buddy-create",
+                "device": device.id,
+                "created": created,
+                "error": f"buddy registration failed: {exc}",
+                "rollback": rollback,
+            }
+        updated_estate = load_estate(self.estate.manifest_path)
+        updated_device = next(
+            current for current in updated_estate.devices
+            if current.id == device.id
+        )
+        matching_neighborhoods = tuple(
+            neighborhood
+            for neighborhood in updated_device.neighborhoods
+            if neighborhood.manifest == created["neighborhood"]["manifest"]
+        )
+        if len(matching_neighborhoods) != 1:
+            rollback = self._rollback_buddy(
+                device,
+                runner,
+                created,
+                registered=registered,
+                updated_device=None,
+            )
+            return {
+                "ok": False,
+                "schema": ESTATE_SCHEMA,
+                "estate": self.estate.name,
+                "action": "buddy-create",
+                "device": device.id,
+                "created": created,
+                "registered": registered,
+                "error": "registered buddy neighborhood could not be isolated",
+                "rollback": rollback,
+            }
+        isolated_device = replace(
+            updated_device,
+            catalog_roots=(),
+            audit_roots=(),
+            neighborhoods=matching_neighborhoods,
+        )
+        started = (
+            self._run_local(isolated_device, "up")
+            if isolated_device.transport == "local"
+            else self._run_remote(isolated_device, "up")
+        )
+        if not started.get("ok"):
+            rollback = self._rollback_buddy(
+                device,
+                runner,
+                created,
+                registered=registered,
+                updated_device=updated_device,
+            )
+            return {
+                "ok": False,
+                "schema": ESTATE_SCHEMA,
+                "estate": self.estate.name,
+                "action": "buddy-create",
+                "device": device.id,
+                "created": created,
+                "registered": registered,
+                "started": started,
+                "rollback": rollback,
+            }
+        members = []
+        for neighborhood_result in started.get("neighborhoods", []):
+            if not isinstance(neighborhood_result, dict):
+                continue
+            result = neighborhood_result.get("result")
+            if not isinstance(result, dict):
+                continue
+            members.extend(
+                member
+                for member in result.get("members", [])
+                if isinstance(member, dict)
+                and member.get("rappid") == created["rappid"]
+            )
+        if len(members) != 1 or not isinstance(members[0].get("port"), int):
+            rollback = self._rollback_buddy(
+                device,
+                runner,
+                created,
+                registered=registered,
+                updated_device=updated_device,
+            )
+            return {
+                "ok": False,
+                "schema": ESTATE_SCHEMA,
+                "estate": self.estate.name,
+                "action": "buddy-create",
+                "device": device.id,
+                "created": created,
+                "registered": registered,
+                "started": started,
+                "error": "started buddy identity or port could not be proven",
+                "rollback": rollback,
+            }
+        actual_port = int(members[0]["port"])
+        try:
+            handshake = runner(
+                updated_device,
+                "handshake",
+                buddy_handshake_payload(
+                    device.id,
+                    name=created["name"],
+                    rappid=created["rappid"],
+                    port=actual_port,
+                    identity_nonce=created["identity_nonce"],
+                ),
+            )
+        except (OSError, RappHerdrError) as exc:
+            handshake = {"ok": False, "error": str(exc)}
+        if not handshake.get("ok") or not handshake.get("ready"):
+            rollback = self._rollback_buddy(
+                device,
+                runner,
+                created,
+                registered=registered,
+                updated_device=updated_device,
+            )
+            return {
+                "ok": False,
+                "schema": ESTATE_SCHEMA,
+                "estate": self.estate.name,
+                "action": "buddy-create",
+                "device": device.id,
+                "created": created,
+                "registered": registered,
+                "started": started,
+                "handshake": handshake,
+                "actual_port": actual_port,
+                "presence": "offline",
+                "rollback": rollback,
+            }
+        return {
+            "ok": bool(handshake.get("ok")),
+            "schema": ESTATE_SCHEMA,
+            "estate": self.estate.name,
+            "action": "buddy-create",
+            "device": device.id,
+            "created": created,
+            "registered": registered,
+            "started": started,
+            "handshake": handshake,
+            "actual_port": actual_port,
+            "presence": (
+                "online"
+                if handshake.get("ok") and handshake.get("ready")
+                else "offline"
+            ),
+        }
+
+    def _rollback_buddy(
+        self,
+        device: EstateDevice,
+        runner,
+        created: dict[str, Any],
+        *,
+        registered: dict[str, Any] | None,
+        updated_device: EstateDevice | None,
+    ) -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "ok": True,
+            "stopped": None,
+            "manifest_restored": None,
+            "deleted": None,
+        }
+        if updated_device is not None:
+            matching = tuple(
+                neighborhood
+                for neighborhood in updated_device.neighborhoods
+                if neighborhood.manifest == created["neighborhood"]["manifest"]
+            )
+            if len(matching) == 1:
+                isolated = replace(
+                    updated_device,
+                    catalog_roots=(),
+                    audit_roots=(),
+                    neighborhoods=matching,
+                )
+                stopped = (
+                    self._run_local(isolated, "down")
+                    if isolated.transport == "local"
+                    else self._run_remote(isolated, "down")
+                )
+                result["stopped"] = stopped
+                if not stopped.get("ok"):
+                    result["ok"] = False
+                    result["error"] = (
+                        "could not stop the created buddy; resources preserved"
+                    )
+                    return result
+        if registered is not None:
+            try:
+                from .buddy import remove_buddy_neighborhood
+
+                removed = remove_buddy_neighborhood(
+                    self.estate.manifest_path,
+                    device.id,
+                    created["neighborhood"]["manifest"],
+                    expected_hash=registered["manifest_hash_after"],
+                )
+                result["manifest_restored"] = bool(removed.get("ok"))
+            except (OSError, UnicodeError, json.JSONDecodeError, RappHerdrError) as exc:
+                result["ok"] = False
+                result["manifest_restored"] = False
+                result["error"] = f"cannot restore estate manifest: {exc}"
+                return result
+        try:
+            deleted = runner(
+                device,
+                "delete",
+                buddy_cleanup_payload(
+                    device.id,
+                    workspace=created["workspace"],
+                    manifest=created["manifest"],
+                    rappid=created["rappid"],
+                    identity_nonce=created["identity_nonce"],
+                ),
+            )
+            result["deleted"] = deleted
+            result["ok"] = bool(deleted.get("ok"))
+        except (OSError, RappHerdrError) as exc:
+            result["ok"] = False
+            result["error"] = f"cannot delete buddy resources: {exc}"
+        return result

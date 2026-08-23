@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 from typing import Sequence
 
+from .buddy import decode_buddy_payload, run_buddy_device
 from .cell import decode_cell_payload, load_cell_payload, run_cell
 from .estate import (
     EstateManager,
@@ -82,6 +83,26 @@ def _parser() -> argparse.ArgumentParser:
     estate_probe.add_argument("manifest", help="Path to rapp-herdr estate JSON")
     estate_probe.add_argument("--base-port", type=int, default=7199)
     estate_probe.add_argument("--ssh", help="Path to the SSH binary")
+    estate_buddy = estate_commands.add_parser("buddy")
+    estate_buddy_commands = estate_buddy.add_subparsers(
+        dest="buddy_action",
+        required=True,
+    )
+    estate_buddy_create = estate_buddy_commands.add_parser("create")
+    estate_buddy_create.add_argument(
+        "manifest",
+        help="Path to rapp-herdr estate JSON",
+    )
+    estate_buddy_create.add_argument("--device", required=True)
+    estate_buddy_create.add_argument("--name", required=True)
+    estate_buddy_create.add_argument("--role", required=True)
+    estate_buddy_create.add_argument(
+        "--ui",
+        choices=["auto", "chat", "rapplication"],
+        default="auto",
+    )
+    estate_buddy_create.add_argument("--port-start", type=int, default=7200)
+    estate_buddy_create.add_argument("--ssh", help="Path to the SSH binary")
 
     doctor = commands.add_parser("doctor")
     doctor.add_argument("--session")
@@ -112,6 +133,10 @@ def _parser() -> argparse.ArgumentParser:
     probe_device = commands.add_parser("_probe-device", help=argparse.SUPPRESS)
     probe_device.add_argument("action", choices=["seed", "mark", "verify"])
     probe_device.add_argument("--payload", required=True)
+
+    buddy_device = commands.add_parser("_buddy-device", help=argparse.SUPPRESS)
+    buddy_device.add_argument("action", choices=["create", "handshake", "delete"])
+    buddy_device.add_argument("--payload", required=True)
 
     cell = commands.add_parser("_cell", help=argparse.SUPPRESS)
     cell_payload = cell.add_mutually_exclusive_group(required=True)
@@ -161,6 +186,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             _print(result)
             return 0 if result.get("ok") else 1
+        if args.command == "_buddy-device":
+            result = run_buddy_device(
+                args.action,
+                decode_buddy_payload(args.payload),
+            )
+            _print(result)
+            return 0 if result.get("ok") else 1
         if args.command == "_cell":
             payload = (
                 decode_cell_payload(args.payload)
@@ -171,14 +203,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "estate":
             estate = load_estate(args.manifest)
             manager = EstateManager(estate, ssh_binary=args.ssh)
-            result = (
-                manager.probe(
+            if args.estate_command == "probe":
+                result = manager.probe(
                     args.probe_action,
                     base_port=args.base_port,
                 )
-                if args.estate_command == "probe"
-                else manager.run(args.estate_command)
-            )
+            elif args.estate_command == "buddy":
+                result = manager.create_buddy(
+                    device_id=args.device,
+                    name=args.name,
+                    role=args.role,
+                    ui=args.ui,
+                    port_start=args.port_start,
+                )
+            else:
+                result = manager.run(args.estate_command)
             _print(result)
             return 0 if result.get("ok") else 1
         if args.command == "doctor":

@@ -157,6 +157,38 @@ rapp-herdr estate probe restart ~/.config/rapp-herdr/estate.json
 rapp-herdr estate probe verify ~/.config/rapp-herdr/estate.json
 ```
 
+Each enabled device must declare a `probe_target`: one real loopback Twin on
+that same device. Probe `/chat` turns are relayed to that Twin and succeed only
+when it replies; storing the marker alone is a failure. Relay state preserves
+the target session and bounded receipts across probe restarts. A successful
+reply is the authoritative presence signal: the target is live, online, and
+ready to chat, regardless of its prior Herdr attention state.
+
+## Create a buddy anywhere in the herd
+
+Native buddy mode creates a bounded rapplication Twin on any enabled estate
+device:
+
+```bash
+rapp-herdr estate buddy create ~/.config/rapp-herdr/estate.json \
+  --device rappter-two \
+  --name "Research Buddy" \
+  --role "Research questions and cite evidence." \
+  --ui auto
+```
+
+`--ui chat` uses the canonical Brainstem chat. `--ui rapplication` generates a
+static role front end. `--ui auto` chooses a custom front end for visual,
+dashboard, workflow, studio, tracker, portal, monitor, builder, or report roles;
+other roles use chat. Every custom UI includes **Use default chat**, so the
+canonical `/chat` experience is always recoverable.
+
+Creation mints a keyless RAPP/1 identity under the estate's explicit
+`buddy_owner`, writes an owned Twin workspace and one-member neighborhood,
+registers and launches it through Herdr, then marks it online only after an
+identity-nonce health check and a real `/chat` response ending in `READY`.
+Failure rolls back only resources carrying the matching buddy ownership marker.
+
 The estate projection has two complementary layers:
 
 - **Runtime neighborhoods:** one Herdr workspace per RAPP neighborhood, one
