@@ -413,6 +413,11 @@ def create_buddy(value: dict[str, Any]) -> dict[str, Any]:
                 identity_nonce,
             ),
         )
+        _write_text(
+            workspace_build / "requirements.txt",
+            "flask\nrequests\npython-dotenv\n",
+            0o644,
+        )
         if selected_ui == "rapplication":
             page, css, script = _custom_ui(name, role)
             _write_text(workspace_build / "ui" / "index.html", page, 0o644)

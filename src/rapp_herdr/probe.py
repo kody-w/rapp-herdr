@@ -423,7 +423,11 @@ def _seed(value: dict[str, Any]) -> dict[str, Any]:
         ).encode(),
     )
     _atomic_write(workspace / "brainstem.py", _BRAINSTEM.encode())
-    (workspace / "requirements.txt").unlink(missing_ok=True)
+    _atomic_write(
+        workspace / "requirements.txt",
+        b"flask\nrequests\npython-dotenv\n",
+        0o644,
+    )
     (workspace / "agents").mkdir(exist_ok=True, mode=0o700)
     state_path = workspace / ".brainstem_data" / "persistence_probe.json"
     with _probe_state_lock(state_path):
