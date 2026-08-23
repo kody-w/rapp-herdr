@@ -50,18 +50,32 @@ def _is_persistence_probe(
     neighborhood: str,
     entrypoint: str,
 ) -> bool:
-    marker = workspace / ".rapp-herdr-probe.json"
+    root = workspace.resolve(strict=False)
+    marker = root / ".rapp-herdr-probe.json"
     try:
+        resolved_marker = marker.resolve(strict=False)
+        if (
+            marker.is_symlink()
+            or (
+                resolved_marker != root
+                and root not in resolved_marker.parents
+            )
+        ):
+            return False
         value = json.loads(marker.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError):
+    except (OSError, RuntimeError, UnicodeError, json.JSONDecodeError):
         return False
     device_id = value.get("device_id") if isinstance(value, dict) else None
     return (
         isinstance(device_id, str)
-        and value.get("schema") == PROBE_SCHEMA
-        and value.get("rappid") == rappid
+        and value
+        == {
+            "schema": PROBE_SCHEMA,
+            "device_id": device_id,
+            "rappid": rappid,
+        }
         and rappid == probe_rappid(device_id)
-        and workspace.name == f"rapp-herdr-persistence-probe-{device_id}"
+        and root.name == f"rapp-herdr-persistence-probe-{device_id}"
         and neighborhood == PROBE_NEIGHBORHOOD_NAME
         and entrypoint == "brainstem.py"
     )

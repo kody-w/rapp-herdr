@@ -139,6 +139,18 @@ manifest as a local rollback backup before adding the managed probe
 neighborhood. Probes reuse each device's installed Brainstem interpreter in
 verification-only mode; they never install packages into it.
 
+`seed` validates an existing probe's complete owned state before preserving it;
+malformed JSON, incorrect identity or schema, invalid counters, and invalid
+message history fail only that device's result. Managed marker, state, and mark
+paths must resolve inside the probe workspace, so symlink or junction escapes
+are rejected before any read or write.
+
+`verify` treats the restarted runtime response and the state file as independent
+evidence. Both must report the exact probe schema, device ID, RAPPID, survival
+marker, counters, and message history; they must agree with each other, retain
+the marked message, and report a boot count greater than the count captured by
+`mark`.
+
 Launch the live, read-only topology dashboard:
 
 ```bash
@@ -155,7 +167,12 @@ Use **Export backup** to download a checksummed local JSON backup of the
 authoritative estate manifest. **Import backup** accepts that envelope or a
 plain `rapp-herdr-estate/1.0` manifest, validates it before replacement, writes
 it atomically, and retains the previous manifest beside `estate.json` as a
-mode-`0600` rollback copy.
+mode-`0600` rollback copy on POSIX. Export and import share one 2,097,152-byte
+limit for the complete serialized UTF-8 JSON file, including envelope metadata
+and whitespace, so every successful export is restorable by the dashboard.
+Imports are serialized across dashboard instances and processes with a bounded,
+crash-recoverable local lock; each rollback therefore contains the manifest
+immediately preceding its import.
 
 The estate projection has two complementary layers:
 

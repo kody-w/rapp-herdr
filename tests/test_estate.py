@@ -17,7 +17,11 @@ from rapp_herdr.estate import (
     run_estate_device,
 )
 from rapp_herdr.model import RappHerdrError
-from rapp_herdr.probe import probe_rappid
+from rapp_herdr.probe import (
+    probe_payload,
+    probe_rappid,
+    run_probe_device,
+)
 
 from tests.helpers import write_json
 
@@ -219,6 +223,45 @@ class EstateTests(unittest.TestCase):
             self.assertFalse(result["ok"])
             self.assertTrue(all(device["skipped"] for device in result["devices"]))
 
+    def test_probe_seed_failure_is_isolated_to_its_device(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            estate = load_estate(create_estate(Path(directory) / "estate.json"))
+            manager = EstateManager(estate)
+            remote_result = {
+                "ok": True,
+                "device": "remote-mac",
+                "workspace": "/remote/probe",
+            }
+
+            with patch.object(
+                manager,
+                "_run_local_probe",
+                side_effect=RappHerdrError("invalid persistence probe state"),
+            ), patch.object(
+                manager,
+                "_run_remote_probe",
+                return_value=remote_result,
+            ), patch(
+                "rapp_herdr.estate.add_probe_neighborhoods",
+                return_value={
+                    "ok": True,
+                    "changed": True,
+                    "devices": ["remote-mac"],
+                },
+            ) as update:
+                result = manager.probe("seed")
+
+            self.assertFalse(result["ok"])
+            by_device = {item["device"]: item for item in result["devices"]}
+            self.assertFalse(by_device["local"]["ok"])
+            self.assertIn("invalid persistence probe state", by_device["local"]["error"])
+            self.assertTrue(by_device["remote-mac"]["ok"])
+            update.assert_called_once_with(
+                estate.manifest_path,
+                {"remote-mac"},
+                base_port=7199,
+            )
+
     def test_unsafe_ssh_alias_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = create_estate(Path(directory) / "estate.json")
@@ -294,6 +337,71 @@ class EstateTests(unittest.TestCase):
             self.assertFalse(result["ok"])
             self.assertTrue(result["reachable"])
             self.assertEqual(result["error"], "not restarted")
+
+    @patch("rapp_herdr.estate.subprocess.run")
+    def test_remote_probe_rejects_pre_contract_and_incomplete_success(
+        self,
+        run,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            estate = load_estate(create_estate(root / "estate.json"))
+            device = estate.devices[1]
+            manager = EstateManager(estate, ssh_binary="/usr/bin/ssh")
+            seeded = run_probe_device(
+                "seed",
+                probe_payload(
+                    device.id,
+                    str(root / "twins"),
+                    base_port=7199,
+                    neighborhood_manifest=str(
+                        root / "probe-neighborhood" / "neighborhood.json"
+                    ),
+                ),
+            )
+            missing_runtime_state = {
+                **seeded,
+                "action": "verify",
+                "evidence": {
+                    **seeded["evidence"],
+                    "action": "verify",
+                },
+            }
+            cases = (
+                (
+                    "seed",
+                    {
+                        "ok": True,
+                        "device": device.id,
+                        "workspace": "/remote/old-probe",
+                    },
+                    "versioned evidence",
+                ),
+                (
+                    "verify",
+                    missing_runtime_state,
+                    "runtime_state evidence",
+                ),
+            )
+
+            for action, response, error in cases:
+                with self.subTest(action=action):
+                    run.return_value = subprocess.CompletedProcess(
+                        [],
+                        0,
+                        stdout=json.dumps(response),
+                        stderr="",
+                    )
+                    result = manager._run_remote_probe(
+                        device,
+                        action,
+                        base_port=7199,
+                        message=None,
+                    )
+
+                    self.assertFalse(result["ok"])
+                    self.assertTrue(result["reachable"])
+                    self.assertIn(error, result["error"])
 
     @patch("rapp_herdr.estate._start_herdr_session")
     def test_device_with_no_neighborhoods_still_starts_session(self, start) -> None:

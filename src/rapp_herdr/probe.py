@@ -13,8 +13,12 @@ from pathlib import Path
 from typing import Any
 
 from .model import RappHerdrError
+from .version import __version__
 
 PROBE_SCHEMA = "rapp-herdr-persistence-probe/1.0"
+PROBE_EVIDENCE_SCHEMA = "rapp-herdr-persistence-probe-evidence/1.0"
+PROBE_STRICT_RUNTIME_STATE_CAPABILITY = "strict-runtime-state/1"
+PROBE_MANIFEST_UPDATE_RETRIES = 4
 PROBE_NEIGHBORHOOD_NAME = "RAPP-Herdr Persistence Probe"
 PROBE_NEIGHBORHOOD_RAPPID = (
     "rappid:@rapp/persistence-probe:"
@@ -25,6 +29,20 @@ PROBE_NEIGHBORHOOD_MANIFEST = (
 )
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
+
+def _probe_evidence(action: str, device_id: str) -> dict[str, Any]:
+    return {
+        "schema": PROBE_EVIDENCE_SCHEMA,
+        "capabilities": [PROBE_STRICT_RUNTIME_STATE_CAPABILITY],
+        "action": action,
+        "device": device_id,
+        "implementation": {
+            "name": "rapp-herdr",
+            "version": __version__,
+        },
+    }
+
+
 _BRAINSTEM = r'''from __future__ import annotations
 
 import json
@@ -34,20 +52,39 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-state_path = Path(".brainstem_data") / "persistence_probe.json"
-state_path.parent.mkdir(parents=True, exist_ok=True)
+workspace = Path.cwd().resolve()
+state_directory = workspace / ".brainstem_data"
+state_path = state_directory / "persistence_probe.json"
 state_lock = threading.Lock()
 
 
+def managed_state_path(path):
+    for candidate in (state_directory, path):
+        resolved = candidate.resolve(strict=False)
+        if candidate.is_symlink() or (
+            resolved != workspace and workspace not in resolved.parents
+        ):
+            raise RuntimeError(
+                "persistence probe state path escapes its workspace"
+            )
+    return path
+
+
+managed_state_path(state_directory)
+state_directory.mkdir(parents=True, exist_ok=True)
+managed_state_path(state_directory)
+
+
 def read_state():
-    return json.loads(state_path.read_text(encoding="utf-8"))
+    return json.loads(managed_state_path(state_path).read_text(encoding="utf-8"))
 
 
 def write_state(value):
-    temporary = state_path.with_suffix(".tmp")
+    target = managed_state_path(state_path)
+    temporary = managed_state_path(state_path.with_suffix(".tmp"))
     temporary.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
     os.chmod(temporary, 0o600)
-    os.replace(temporary, state_path)
+    os.replace(temporary, target)
 
 
 with state_lock:
@@ -148,6 +185,10 @@ def _nonnegative_int(value: Any, field: str) -> int:
     return value
 
 
+def _survival_marker(rappid: str) -> str:
+    return hashlib.sha256(f"{rappid}\0survival".encode()).hexdigest()
+
+
 def probe_rappid(device_id: str) -> str:
     digest = hashlib.sha256(
         f"rapp-herdr-persistence-probe\0{device_id}".encode()
@@ -224,6 +265,30 @@ def _write_json(path: Path, value: dict[str, Any]) -> None:
     )
 
 
+def _managed_workspace_path(
+    workspace: Path,
+    relative: str | Path,
+    label: str,
+) -> Path:
+    relative_path = Path(relative)
+    if relative_path.is_absolute() or ".." in relative_path.parts:
+        raise RappHerdrError(f"{label} must be inside the probe workspace")
+    root = workspace.resolve(strict=False)
+    candidate = root
+    for part in relative_path.parts:
+        candidate /= part
+        try:
+            resolved = candidate.resolve(strict=False)
+            is_symlink = candidate.is_symlink()
+        except (OSError, RuntimeError) as exc:
+            raise RappHerdrError(f"cannot resolve {label} {candidate}: {exc}") from exc
+        if is_symlink or (resolved != root and root not in resolved.parents):
+            raise RappHerdrError(
+                f"{label} escapes the probe workspace: {candidate}"
+            )
+    return root / relative_path
+
+
 def _paths(value: dict[str, Any]) -> tuple[str, str, Path, Path, int]:
     if value.get("schema") != PROBE_SCHEMA:
         raise RappHerdrError(f"probe payload must use schema {PROBE_SCHEMA!r}")
@@ -261,6 +326,202 @@ def _read_json(path: Path, label: str) -> dict[str, Any]:
         raise RappHerdrError(f"invalid {label} {path}: {exc}") from exc
     if not isinstance(value, dict):
         raise RappHerdrError(f"{label} must contain a JSON object: {path}")
+    return value
+
+
+def _validate_state(
+    value: dict[str, Any],
+    *,
+    device_id: str,
+    rappid: str,
+    label: str,
+) -> dict[str, Any]:
+    required_fields = {
+        "schema",
+        "device_id",
+        "rappid",
+        "survival_marker",
+        "seeded_at",
+        "boot_count",
+        "message_count",
+        "messages",
+    }
+    unexpected = set(value) - required_fields - {"last_started_at"}
+    missing = required_fields - set(value)
+    if missing or unexpected:
+        details = []
+        if missing:
+            details.append(f"missing {', '.join(sorted(missing))}")
+        if unexpected:
+            details.append(f"unexpected {', '.join(sorted(unexpected))}")
+        raise RappHerdrError(f"{label} has invalid fields: {'; '.join(details)}")
+    if value.get("schema") != PROBE_SCHEMA:
+        raise RappHerdrError(f"{label} schema does not match {PROBE_SCHEMA!r}")
+    if value.get("device_id") != device_id or value.get("rappid") != rappid:
+        raise RappHerdrError(f"{label} identity diverged")
+    if value.get("survival_marker") != _survival_marker(rappid):
+        raise RappHerdrError(f"{label} survival marker diverged")
+    boot_count = _nonnegative_int(value.get("boot_count"), f"{label} boot_count")
+    message_count = _nonnegative_int(
+        value.get("message_count"),
+        f"{label} message_count",
+    )
+    messages = value.get("messages")
+    if not isinstance(messages, list) or len(messages) > 100:
+        raise RappHerdrError(f"{label} messages must be an array of at most 100 items")
+    for index, message in enumerate(messages):
+        if not isinstance(message, dict):
+            raise RappHerdrError(f"{label} messages[{index}] must be an object")
+        if set(message) != {"content", "recorded_at"}:
+            raise RappHerdrError(
+                f"{label} messages[{index}] has invalid fields"
+            )
+        _required_text(message.get("content"), f"{label} messages[{index}].content")
+        _required_text(
+            message.get("recorded_at"),
+            f"{label} messages[{index}].recorded_at",
+        )
+    if len(messages) != min(message_count, 100):
+        raise RappHerdrError(
+            f"{label} message_count does not match its bounded message history"
+        )
+    _required_text(value.get("seeded_at"), f"{label} seeded_at")
+    if "last_started_at" in value:
+        _required_text(value["last_started_at"], f"{label} last_started_at")
+    # Materialize both counters so bools and custom integer-like values cannot
+    # survive validation through later dictionary comparisons.
+    value["boot_count"] = boot_count
+    value["message_count"] = message_count
+    return value
+
+
+def _read_probe_state(
+    path: Path,
+    *,
+    device_id: str,
+    rappid: str,
+    label: str = "persistence probe state",
+) -> dict[str, Any]:
+    return _validate_state(
+        _read_json(path, label),
+        device_id=device_id,
+        rappid=rappid,
+        label=label,
+    )
+
+
+def validate_probe_response(
+    value: dict[str, Any],
+    *,
+    action: str,
+    device_id: str,
+) -> dict[str, Any]:
+    if value.get("ok") is not True:
+        return value
+    evidence = value.get("evidence")
+    if not isinstance(evidence, dict):
+        raise RappHerdrError(
+            "persistence probe response omitted versioned evidence"
+        )
+    if value.get("action") != action or value.get("device") != device_id:
+        raise RappHerdrError(
+            "persistence probe response action or device does not match"
+        )
+    capabilities = evidence.get("capabilities")
+    implementation = evidence.get("implementation")
+    if (
+        evidence.get("schema") != PROBE_EVIDENCE_SCHEMA
+        or evidence.get("action") != action
+        or evidence.get("device") != device_id
+        or not isinstance(capabilities, list)
+        or PROBE_STRICT_RUNTIME_STATE_CAPABILITY not in capabilities
+    ):
+        raise RappHerdrError(
+            "persistence probe response has incompatible evidence"
+        )
+    if (
+        not isinstance(implementation, dict)
+        or implementation.get("name") != "rapp-herdr"
+    ):
+        raise RappHerdrError(
+            "persistence probe response omitted implementation evidence"
+        )
+    implementation_version = _required_text(
+        implementation.get("version"),
+        "probe evidence implementation version",
+    )
+    if implementation_version != __version__:
+        raise RappHerdrError(
+            "persistence probe response implementation version does not match "
+            f"controller version {__version__}"
+        )
+    rappid = probe_rappid(device_id)
+    if value.get("rappid") != rappid:
+        raise RappHerdrError(
+            "persistence probe response RAPPID does not match its device"
+        )
+    state = value.get("state")
+    if not isinstance(state, dict):
+        raise RappHerdrError(
+            "persistence probe response omitted strict state evidence"
+        )
+    validated_state = _validate_state(
+        dict(state),
+        device_id=device_id,
+        rappid=rappid,
+        label="probe response state evidence",
+    )
+    if action in {"mark", "verify"}:
+        runtime_state = value.get("runtime_state")
+        if not isinstance(runtime_state, dict):
+            raise RappHerdrError(
+                "persistence probe response omitted strict runtime_state evidence"
+            )
+        validated_runtime_state = _validate_state(
+            dict(runtime_state),
+            device_id=device_id,
+            rappid=rappid,
+            label="probe response runtime_state evidence",
+        )
+        if validated_runtime_state != validated_state:
+            raise RappHerdrError(
+                "probe response runtime_state and state evidence diverged"
+            )
+    return value
+
+
+def _validate_mark_record(
+    value: dict[str, Any],
+    *,
+    device_id: str,
+    rappid: str,
+) -> dict[str, Any]:
+    if set(value) != {
+        "schema",
+        "device_id",
+        "rappid",
+        "message",
+        "marked_boot_count",
+        "marked_message_count",
+        "survival_marker",
+    }:
+        raise RappHerdrError("persistence probe mark has invalid fields")
+    if (
+        value.get("schema") != PROBE_SCHEMA
+        or value.get("device_id") != device_id
+        or value.get("rappid") != rappid
+        or value.get("survival_marker") != _survival_marker(rappid)
+    ):
+        raise RappHerdrError("persistence probe mark identity diverged")
+    _required_text(value.get("message"), "marked probe message")
+    _nonnegative_int(
+        value.get("marked_boot_count"),
+        "marked probe boot_count",
+    )
+    _nonnegative_int(
+        value.get("marked_message_count"),
+        "marked probe message count",
+    )
     return value
 
 
@@ -307,28 +568,68 @@ def _claim_neighborhood(
 
 def _seed(value: dict[str, Any]) -> dict[str, Any]:
     device_id, rappid, workspace, manifest, base_port = _paths(value)
-    marker_path = workspace / ".rapp-herdr-probe.json"
-    if marker_path.is_symlink():
-        raise RappHerdrError(f"probe marker cannot be a symlink: {marker_path}")
-    if workspace.exists() and not marker_path.is_file():
-        raise RappHerdrError(
-            f"refusing to replace unmanaged probe workspace: {workspace}"
-        )
-    workspace.mkdir(parents=True, exist_ok=True, mode=0o700)
     marker = {
         "schema": PROBE_SCHEMA,
         "device_id": device_id,
         "rappid": rappid,
     }
-    if marker_path.is_file():
-        try:
-            existing = json.loads(marker_path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-            raise RappHerdrError(f"invalid probe marker {marker_path}: {exc}") from exc
-        if existing != marker:
+    marker_path = _managed_workspace_path(
+        workspace,
+        ".rapp-herdr-probe.json",
+        "probe ownership marker",
+    )
+    if workspace.exists():
+        if not workspace.is_dir() or not marker_path.is_file():
+            raise RappHerdrError(
+                f"refusing to replace unmanaged probe workspace: {workspace}"
+            )
+        if _read_json(marker_path, "probe marker") != marker:
             raise RappHerdrError(
                 f"probe workspace ownership does not match: {workspace}"
             )
+    workspace.mkdir(parents=True, exist_ok=True, mode=0o700)
+    marker_path = _managed_workspace_path(
+        workspace,
+        ".rapp-herdr-probe.json",
+        "probe ownership marker",
+    )
+    state_directory = _managed_workspace_path(
+        workspace,
+        ".brainstem_data",
+        "probe state directory",
+    )
+    if state_directory.exists() and not state_directory.is_dir():
+        raise RappHerdrError(
+            f"probe state directory is not a directory: {state_directory}"
+        )
+    state_path = _managed_workspace_path(
+        workspace,
+        Path(".brainstem_data") / "persistence_probe.json",
+        "probe state",
+    )
+    if state_path.exists() and not state_path.is_file():
+        raise RappHerdrError(f"probe state is not a regular file: {state_path}")
+    if state_path.is_file():
+        state = _read_probe_state(
+            state_path,
+            device_id=device_id,
+            rappid=rappid,
+        )
+    else:
+        state = {
+            "schema": PROBE_SCHEMA,
+            "device_id": device_id,
+            "rappid": rappid,
+            "survival_marker": _survival_marker(rappid),
+            "seeded_at": time.strftime(
+                "%Y-%m-%dT%H:%M:%SZ",
+                time.gmtime(),
+            ),
+            "boot_count": 0,
+            "message_count": 0,
+            "messages": [],
+        }
+
     _write_json(marker_path, marker)
     _write_json(
         workspace / "rappid.json",
@@ -354,26 +655,8 @@ def _seed(value: dict[str, Any]) -> dict[str, Any]:
     # imports without asking pip to mutate an externally managed environment.
     (workspace / "requirements.txt").unlink(missing_ok=True)
     (workspace / "agents").mkdir(exist_ok=True, mode=0o700)
-    state_path = workspace / ".brainstem_data" / "persistence_probe.json"
     if not state_path.is_file():
-        _write_json(
-            state_path,
-            {
-                "schema": PROBE_SCHEMA,
-                "device_id": device_id,
-                "rappid": rappid,
-                "survival_marker": hashlib.sha256(
-                    f"{rappid}\0survival".encode()
-                ).hexdigest(),
-                "seeded_at": time.strftime(
-                    "%Y-%m-%dT%H:%M:%SZ",
-                    time.gmtime(),
-                ),
-                "boot_count": 0,
-                "message_count": 0,
-                "messages": [],
-            },
-        )
+        _write_json(state_path, state)
 
     expected_manifest = {
         "schema": "rapp-neighborhood/1.0",
@@ -400,7 +683,7 @@ def _seed(value: dict[str, Any]) -> dict[str, Any]:
         "manifest": str(manifest),
         "rappid": rappid,
         "port": base_port,
-        "state": json.loads(state_path.read_text(encoding="utf-8")),
+        "state": state,
     }
 
 
@@ -429,6 +712,29 @@ def _request_json(
 
 def _observe(value: dict[str, Any], *, mark: bool) -> dict[str, Any]:
     device_id, rappid, workspace, _manifest, base_port = _paths(value)
+    state_directory = _managed_workspace_path(
+        workspace,
+        ".brainstem_data",
+        "probe state directory",
+    )
+    if not state_directory.is_dir():
+        raise RappHerdrError(
+            f"probe state directory is not a directory: {state_directory}"
+        )
+    state_path = _managed_workspace_path(
+        workspace,
+        Path(".brainstem_data") / "persistence_probe.json",
+        "probe state",
+    )
+    if not state_path.is_file():
+        raise RappHerdrError(f"probe state is not a regular file: {state_path}")
+    mark_path = _managed_workspace_path(
+        workspace,
+        ".rapp-herdr-probe-mark.json",
+        "probe mark",
+    )
+    if mark_path.exists() and not mark_path.is_file():
+        raise RappHerdrError(f"probe mark is not a regular file: {mark_path}")
     if mark:
         text = _required_text(value.get("message"), "probe.message")
         response = _request_json(
@@ -438,22 +744,31 @@ def _observe(value: dict[str, Any], *, mark: bool) -> dict[str, Any]:
         )
     else:
         response = _request_json(f"http://127.0.0.1:{base_port}/health")
-    state_path = workspace / ".brainstem_data" / "persistence_probe.json"
-    try:
-        state = json.loads(state_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise RappHerdrError(f"cannot read probe state {state_path}: {exc}") from exc
-    if state.get("rappid") != rappid or state.get("device_id") != device_id:
-        raise RappHerdrError("persistence probe state identity diverged")
+    state = _read_probe_state(
+        state_path,
+        device_id=device_id,
+        rappid=rappid,
+        label="disk persistence probe state",
+    )
     remote_state = response.get("probe")
     if not isinstance(remote_state, dict):
         raise RappHerdrError("persistence probe response omitted its state")
-    if remote_state.get("survival_marker") != state.get("survival_marker"):
-        raise RappHerdrError("persistence probe survival marker diverged")
-    mark_path = workspace / ".rapp-herdr-probe-mark.json"
-    if mark_path.is_symlink():
-        raise RappHerdrError(f"probe mark cannot be a symlink: {mark_path}")
+    remote_state = _validate_state(
+        remote_state,
+        device_id=device_id,
+        rappid=rappid,
+        label="runtime persistence probe state",
+    )
+    if remote_state != state:
+        raise RappHerdrError(
+            "runtime and disk persistence probe state diverged"
+        )
     if mark:
+        messages = remote_state["messages"]
+        if not any(item.get("content") == text for item in messages):
+            raise RappHerdrError(
+                "persistence probe runtime response omitted the marked message"
+            )
         _write_json(
             mark_path,
             {
@@ -475,40 +790,25 @@ def _observe(value: dict[str, Any], *, mark: bool) -> dict[str, Any]:
     else:
         if not mark_path.is_file():
             raise RappHerdrError("persistence probe has not been marked yet")
-        mark_record = _read_json(mark_path, "persistence probe mark")
-        if (
-            mark_record.get("schema") != PROBE_SCHEMA
-            or mark_record.get("device_id") != device_id
-            or mark_record.get("rappid") != rappid
-            or mark_record.get("survival_marker") != state.get("survival_marker")
-        ):
-            raise RappHerdrError("persistence probe mark identity diverged")
-        marked_message = mark_record.get("message")
-        messages = state.get("messages")
-        if (
-            not isinstance(marked_message, str)
-            or not isinstance(messages, list)
-            or not any(
-                isinstance(item, dict)
-                and item.get("content") == marked_message
-                for item in messages
-            )
+        mark_record = _validate_mark_record(
+            _read_json(mark_path, "persistence probe mark"),
+            device_id=device_id,
+            rappid=rappid,
+        )
+        marked_message = mark_record["message"]
+        if not any(
+            item.get("content") == marked_message
+            for item in remote_state["messages"]
         ):
             raise RappHerdrError("persistence probe mark did not survive")
-        message_count = _nonnegative_int(
-            state.get("message_count"),
-            "probe message_count",
-        )
+        message_count = remote_state["message_count"]
         marked_message_count = _nonnegative_int(
             mark_record.get("marked_message_count"),
             "marked probe message_count",
         )
         if message_count < marked_message_count:
             raise RappHerdrError("persistence probe message count rolled back")
-        boot_count = _nonnegative_int(
-            state.get("boot_count"),
-            "probe boot_count",
-        )
+        boot_count = remote_state["boot_count"]
         marked_boot_count = _nonnegative_int(
             mark_record.get("marked_boot_count"),
             "marked probe boot_count",
@@ -523,17 +823,27 @@ def _observe(value: dict[str, Any], *, mark: bool) -> dict[str, Any]:
         "rappid": rappid,
         "port": base_port,
         "state": state,
+        "runtime_state": remote_state,
     }
 
 
 def run_probe_device(action: str, value: dict[str, Any]) -> dict[str, Any]:
     if action == "seed":
-        return _seed(value)
-    if action == "mark":
-        return _observe(value, mark=True)
-    if action == "verify":
-        return _observe(value, mark=False)
-    raise RappHerdrError(f"unsupported persistence probe action: {action}")
+        result = _seed(value)
+    elif action == "mark":
+        result = _observe(value, mark=True)
+    elif action == "verify":
+        result = _observe(value, mark=False)
+    else:
+        raise RappHerdrError(f"unsupported persistence probe action: {action}")
+    device_id = str(result["device"])
+    result["action"] = action
+    result["evidence"] = _probe_evidence(action, device_id)
+    return validate_probe_response(
+        result,
+        action=action,
+        device_id=device_id,
+    )
 
 
 def add_probe_neighborhoods(
@@ -543,71 +853,95 @@ def add_probe_neighborhoods(
     base_port: int,
 ) -> dict[str, Any]:
     manifest_path = Path(manifest).expanduser().resolve()
-    try:
-        value = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise RappHerdrError(f"cannot update estate manifest {manifest_path}: {exc}") from exc
-    if not isinstance(value, dict) or not isinstance(value.get("devices"), list):
-        raise RappHerdrError("estate manifest has no device array")
-    changed = False
-    configured: list[str] = []
-    for device in value["devices"]:
-        if not isinstance(device, dict) or device.get("id") not in device_ids:
-            continue
-        roots = device.get("inventory_roots", ["~/.rapp/twins"])
-        if not isinstance(roots, list) or not roots:
-            raise RappHerdrError(
-                f"device {device.get('id')} has no inventory root for its probe"
-            )
-        neighborhoods = device.setdefault("neighborhoods", [])
-        if not isinstance(neighborhoods, list):
-            raise RappHerdrError(
-                f"device {device.get('id')} neighborhoods must be an array"
-            )
-        existing = [
-            item
-            for item in neighborhoods
-            if isinstance(item, dict)
-            and item.get("manifest") == PROBE_NEIGHBORHOOD_MANIFEST
-        ]
-        desired = {
-            "manifest": PROBE_NEIGHBORHOOD_MANIFEST,
-            "estate_roots": [roots[0]],
-            "base_port": base_port,
-            "brainstem_python": probe_brainstem_python(
-                str(device.get("os") or "posix")
-            ),
-            "bootstrap": False,
-            "listen_host": "127.0.0.1",
-            "entrypoint": "brainstem.py",
-            "managed_by": PROBE_SCHEMA,
-        }
-        if existing:
-            if (
-                len(existing) != 1
-                or existing[0].get("managed_by") != PROBE_SCHEMA
-            ):
-                raise RappHerdrError(
-                    f"device {device.get('id')} has a conflicting probe neighborhood"
-                )
-            if existing[0] != desired:
-                existing[0].clear()
-                existing[0].update(desired)
-                changed = True
-        else:
-            neighborhoods.append(desired)
-            changed = True
-        configured.append(str(device["id"]))
-    if set(configured) != device_ids:
-        raise RappHerdrError("not every seeded device exists in the estate manifest")
-    if not changed:
-        return {"ok": True, "changed": False, "devices": configured}
-    from .backup import import_estate_backup
+    from .backup import ManifestConflictError, import_estate_backup
 
-    result = import_estate_backup(manifest_path, value)
-    return {
-        "ok": True,
-        "changed": True,
-        "devices": configured,
-        "previous_manifest": result["previous_manifest"],
-    }
+    for attempt in range(PROBE_MANIFEST_UPDATE_RETRIES):
+        try:
+            manifest_payload = manifest_path.read_bytes()
+            value = json.loads(manifest_payload)
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise RappHerdrError(
+                f"cannot update estate manifest {manifest_path}: {exc}"
+            ) from exc
+        if not isinstance(value, dict) or not isinstance(
+            value.get("devices"),
+            list,
+        ):
+            raise RappHerdrError("estate manifest has no device array")
+        changed = False
+        configured: list[str] = []
+        for device in value["devices"]:
+            if not isinstance(device, dict) or device.get("id") not in device_ids:
+                continue
+            roots = device.get("inventory_roots", ["~/.rapp/twins"])
+            if not isinstance(roots, list) or not roots:
+                raise RappHerdrError(
+                    f"device {device.get('id')} has no inventory root for its probe"
+                )
+            neighborhoods = device.setdefault("neighborhoods", [])
+            if not isinstance(neighborhoods, list):
+                raise RappHerdrError(
+                    f"device {device.get('id')} neighborhoods must be an array"
+                )
+            existing = [
+                item
+                for item in neighborhoods
+                if isinstance(item, dict)
+                and item.get("manifest") == PROBE_NEIGHBORHOOD_MANIFEST
+            ]
+            desired = {
+                "manifest": PROBE_NEIGHBORHOOD_MANIFEST,
+                "estate_roots": [roots[0]],
+                "base_port": base_port,
+                "brainstem_python": probe_brainstem_python(
+                    str(device.get("os") or "posix")
+                ),
+                "bootstrap": False,
+                "listen_host": "127.0.0.1",
+                "entrypoint": "brainstem.py",
+                "managed_by": PROBE_SCHEMA,
+            }
+            if existing:
+                if (
+                    len(existing) != 1
+                    or existing[0].get("managed_by") != PROBE_SCHEMA
+                ):
+                    raise RappHerdrError(
+                        f"device {device.get('id')} has a conflicting "
+                        "probe neighborhood"
+                    )
+                if existing[0] != desired:
+                    existing[0].clear()
+                    existing[0].update(desired)
+                    changed = True
+            else:
+                neighborhoods.append(desired)
+                changed = True
+            configured.append(str(device["id"]))
+        if set(configured) != device_ids:
+            raise RappHerdrError(
+                "not every seeded device exists in the estate manifest"
+            )
+        if not changed:
+            return {"ok": True, "changed": False, "devices": configured}
+        generation = hashlib.sha256(manifest_payload).hexdigest()
+        try:
+            result = import_estate_backup(
+                manifest_path,
+                value,
+                expected_manifest_sha256=generation,
+            )
+        except ManifestConflictError as exc:
+            if attempt + 1 == PROBE_MANIFEST_UPDATE_RETRIES:
+                raise RappHerdrError(
+                    "estate manifest kept changing while probe neighborhoods "
+                    f"were reconciled ({PROBE_MANIFEST_UPDATE_RETRIES} attempts)"
+                ) from exc
+            continue
+        return {
+            "ok": True,
+            "changed": True,
+            "devices": configured,
+            "previous_manifest": result["previous_manifest"],
+        }
+    raise AssertionError("unreachable probe manifest retry state")

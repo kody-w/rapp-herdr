@@ -13,9 +13,11 @@ from typing import Any
 from urllib.parse import urlparse
 
 from .backup import (
+    BackupSizeError,
     MAX_BACKUP_BYTES,
     export_estate_backup,
     import_estate_backup,
+    serialize_backup_envelope,
 )
 from .estate import EstateManager, load_estate
 from .model import RappHerdrError
@@ -50,14 +52,25 @@ class EstateStatusCache:
 
     def import_backup(self, value: Any) -> dict[str, Any]:
         with self._lock:
-            result = import_estate_backup(self.manifest, value)
-            self._value = None
-            self._expires_at = 0.0
-            return result
+            try:
+                return import_estate_backup(self.manifest, value)
+            finally:
+                self._value = None
+                self._expires_at = 0.0
 
 
 def _html_path() -> Path:
     return Path(__file__).with_name("estate_ui.html")
+
+
+def _html_payload() -> bytes:
+    template = _html_path().read_text(encoding="utf-8")
+    placeholder = "__RAPP_HERDR_MAX_BACKUP_BYTES__"
+    if template.count(placeholder) != 1:
+        raise RappHerdrError(
+            "estate dashboard backup-size contract placeholder is missing"
+        )
+    return template.replace(placeholder, str(MAX_BACKUP_BYTES)).encode("utf-8")
 
 
 def make_handler(
@@ -126,8 +139,8 @@ def make_handler(
             path = parsed.path
             if path in {"/", "/index.html"}:
                 try:
-                    payload = _html_path().read_bytes()
-                except OSError as exc:
+                    payload = _html_payload()
+                except (OSError, UnicodeError, RappHerdrError) as exc:
                     self._json(
                         HTTPStatus.INTERNAL_SERVER_ERROR,
                         {"ok": False, "error": str(exc)},
@@ -156,15 +169,19 @@ def make_handler(
             if path == "/api/backup":
                 try:
                     value = cache.export_backup()
+                    payload = serialize_backup_envelope(value)
+                except BackupSizeError as exc:
+                    self._json(
+                        HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+                        {"ok": False, "error": str(exc)},
+                    )
+                    return
                 except RappHerdrError as exc:
                     self._json(
                         HTTPStatus.INTERNAL_SERVER_ERROR,
                         {"ok": False, "error": str(exc)},
                     )
                     return
-                payload = (
-                    json.dumps(value, ensure_ascii=False, indent=2) + "\n"
-                ).encode("utf-8")
                 stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
                 self._send(
                     HTTPStatus.OK,
@@ -207,7 +224,13 @@ def make_handler(
             if not 0 < content_length <= MAX_BACKUP_BYTES:
                 self._json(
                     HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
-                    {"ok": False, "error": "backup exceeds the allowed size"},
+                    {
+                        "ok": False,
+                        "error": (
+                            "serialized backup must be between 1 and "
+                            f"{MAX_BACKUP_BYTES} bytes"
+                        ),
+                    },
                 )
                 return
             try:

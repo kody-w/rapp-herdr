@@ -413,6 +413,7 @@
           id="backupFile"
           type="file"
           accept="application/json,.json"
+          data-max-backup-bytes="__RAPP_HERDR_MAX_BACKUP_BYTES__"
           aria-label="Choose an estate backup to import"
         />
         <button class="button primary" id="refreshButton" type="button">Refresh shape</button>
@@ -465,6 +466,7 @@
     let snapshot = null;
     let loading = false;
     const dashboardToken = new URLSearchParams(window.location.search).get("token") || "";
+    const maxBackupBytes = Number(ui.backupFile.dataset.maxBackupBytes);
 
     function node(tag, className, text) {
       const element = document.createElement(tag);
@@ -701,20 +703,50 @@
       ui.error.textContent = error instanceof Error ? error.message : String(error);
     }
 
-    function exportBackup() {
-      const link = document.createElement("a");
-      link.href = `/api/backup?token=${encodeURIComponent(dashboardToken)}`;
-      link.download = "";
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
-      ui.liveText.textContent = "Backup exported";
+    async function exportBackup() {
+      ui.exportBackupButton.disabled = true;
+      ui.error.hidden = true;
+      try {
+        const response = await fetch("/api/backup", {
+          cache: "no-store",
+          headers: { "X-RAPP-Herdr-Token": dashboardToken },
+        });
+        if (!response.ok) {
+          let message = `HTTP ${response.status}`;
+          try {
+            const error = await response.json();
+            message = error.error || message;
+          } catch (_error) {
+            // Keep the HTTP status when the server did not return JSON.
+          }
+          throw new Error(message);
+        }
+        const blob = await response.blob();
+        const disposition = response.headers.get("Content-Disposition") || "";
+        const filenameMatch = disposition.match(/filename="([^"]+)"/);
+        const link = document.createElement("a");
+        const objectUrl = URL.createObjectURL(blob);
+        link.href = objectUrl;
+        link.download = filenameMatch ? filenameMatch[1] : "rapp-herdr-estate-backup.json";
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        setTimeout(() => URL.revokeObjectURL(objectUrl), 0);
+        ui.liveText.textContent = "Backup download started";
+      } finally {
+        ui.exportBackupButton.disabled = false;
+      }
     }
 
     async function importBackup(file) {
       if (!file) return;
-      if (file.size > 2 * 1024 * 1024) {
-        throw new Error("Backup exceeds the 2 MB safety limit.");
+      if (!Number.isSafeInteger(maxBackupBytes) || maxBackupBytes <= 0) {
+        throw new Error("Backup size limit is unavailable.");
+      }
+      if (file.size > maxBackupBytes) {
+        throw new Error(
+          `Backup exceeds the ${maxBackupBytes}-byte restore limit.`
+        );
       }
       const payload = await file.text();
       JSON.parse(payload);
@@ -737,9 +769,13 @@
         });
         const data = await response.json();
         if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
-        ui.liveText.textContent = "Backup restored";
+        ui.liveText.textContent = data.warning
+          ? "Backup restored with warning"
+          : "Backup restored";
+        if (data.warning) showError(data.warning);
         window.alert(
           `Estate restored. Previous manifest retained at:\n${data.previous_manifest}`
+          + (data.warning ? `\n\nWarning: ${data.warning}` : "")
         );
         await refresh(true);
       } finally {
@@ -748,7 +784,9 @@
     }
 
     ui.refreshButton.addEventListener("click", () => refresh(true));
-    ui.exportBackupButton.addEventListener("click", exportBackup);
+    ui.exportBackupButton.addEventListener("click", () => {
+      exportBackup().catch(showError);
+    });
     ui.importBackupButton.addEventListener("click", () => ui.backupFile.click());
     ui.backupFile.addEventListener("change", () => {
       importBackup(ui.backupFile.files[0])

@@ -21,6 +21,7 @@ from .probe import decode_probe_payload, run_probe_device
 from .receipts import ReceiptStore
 from .supervisor import supervise
 from .ui import run_ui
+from .version import __version__
 
 
 def _add_common(parser: argparse.ArgumentParser) -> None:
@@ -36,7 +37,11 @@ def _parser() -> argparse.ArgumentParser:
         prog="rapp-herdr",
         description="Manage RAPP Twin neighborhoods in Herdr.",
     )
-    parser.add_argument("--version", action="version", version="rapp-herdr 0.1.3")
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"rapp-herdr {__version__}",
+    )
     commands = parser.add_subparsers(dest="command", required=True)
 
     neighborhood = commands.add_parser("neighborhood")

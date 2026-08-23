@@ -25,6 +25,7 @@ from .probe import (
     probe_payload,
     probe_rappid,
     run_probe_device,
+    validate_probe_response,
 )
 from .receipts import ReceiptStore
 
@@ -723,6 +724,20 @@ class EstateManager:
                 "error": "remote returned an invalid probe result",
             }
         value["reachable"] = True
+        if value.get("ok") is True:
+            try:
+                validate_probe_response(
+                    value,
+                    action=action,
+                    device_id=device.id,
+                )
+            except RappHerdrError as exc:
+                return {
+                    "ok": False,
+                    "device": device.id,
+                    "reachable": True,
+                    "error": f"incompatible remote probe response: {exc}",
+                }
         return value
 
     @staticmethod
