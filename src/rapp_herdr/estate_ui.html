@@ -747,6 +747,16 @@
                 active: cell.agent_status === "working" || cell.agent_status === "blocked",
               });
             });
+          } else if (Number(estate.cells) > 0) {
+            entities.push({
+              kind: "catalog-neighborhood",
+              title: `${estate.estate} neighborhoods`,
+              subtitle: `${Number(estate.cells)} stopped or unmanaged`,
+              device: deviceId,
+              status: estate.state || "down",
+              compliance: "catalog",
+              active: false,
+            });
           }
         });
         const inventory = device.inventory || {};

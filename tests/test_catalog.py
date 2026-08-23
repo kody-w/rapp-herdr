@@ -197,6 +197,20 @@ class CatalogTests(unittest.TestCase):
             self.assertFalse(status["ok"])
             self.assertEqual(status["estates"][0]["state"], "diverged")
 
+    def test_stopped_catalog_status_keeps_cell_identities(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            create_catalog(Path(directory))
+            client = CatalogHerdr()
+            client.context_value = HerdrContext((0, 7, 4), "/tmp/catalog.sock")
+            manager = CatalogManager(client, ReceiptStore(Path(directory) / "state"))
+
+            status = manager.status([directory])
+
+            cells = status["estates"][0]["cells"]
+            self.assertEqual(len(cells), 1)
+            self.assertEqual(cells[0]["label"], "Build Bench")
+            self.assertEqual(cells[0]["agent_status"], "stopped")
+
     def test_missing_catalog_source_is_reported_and_can_be_torn_down(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             estate = create_catalog(Path(directory))

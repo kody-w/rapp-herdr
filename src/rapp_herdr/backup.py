@@ -55,8 +55,6 @@ def _estate_from_backup(value: Any) -> tuple[dict[str, Any], str]:
     if not isinstance(value, dict):
         raise RappHerdrError("estate backup must contain a JSON object")
     schema = value.get("schema")
-    if schema == ESTATE_SCHEMA:
-        return value, ESTATE_SCHEMA
     if schema != BACKUP_SCHEMA:
         raise RappHerdrError(
             f"estate backup must use schema {BACKUP_SCHEMA!r}"
@@ -114,6 +112,39 @@ def import_estate_backup(
             f"cannot replace missing estate manifest: {manifest_path}"
         )
     estate, source_schema = _estate_from_backup(value)
+    return _replace_estate_manifest(
+        manifest_path,
+        estate,
+        source_schema=source_schema,
+    )
+
+
+def replace_estate_manifest(
+    manifest: str | Path,
+    estate: dict[str, Any],
+) -> dict[str, Any]:
+    manifest_path = Path(manifest).expanduser().resolve()
+    if not manifest_path.is_file():
+        raise RappHerdrError(
+            f"cannot replace missing estate manifest: {manifest_path}"
+        )
+    if not isinstance(estate, dict) or estate.get("schema") != ESTATE_SCHEMA:
+        raise RappHerdrError(
+            "internal estate replacement requires a valid estate manifest"
+        )
+    return _replace_estate_manifest(
+        manifest_path,
+        estate,
+        source_schema=ESTATE_SCHEMA,
+    )
+
+
+def _replace_estate_manifest(
+    manifest_path: Path,
+    estate: dict[str, Any],
+    *,
+    source_schema: str,
+) -> dict[str, Any]:
     candidate = _write_candidate(
         manifest_path.parent,
         (json.dumps(estate, ensure_ascii=False, indent=2) + "\n").encode("utf-8"),

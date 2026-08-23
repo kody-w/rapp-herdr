@@ -50,6 +50,23 @@ def _load_json(path: Path) -> dict[str, Any]:
     return value
 
 
+def _string_array(
+    value: Any,
+    field: str,
+    *,
+    require_nonempty: bool = False,
+) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        raise RappHerdrError(f"{field} must be an array")
+    items = tuple(
+        _required_text(item, f"{field}[]")
+        for item in value
+    )
+    if require_nonempty and not items:
+        raise RappHerdrError(f"{field} must contain at least one path")
+    return items
+
+
 @dataclass(frozen=True)
 class EstateNeighborhood:
     manifest: str
@@ -247,17 +264,18 @@ def load_estate(path: str | Path) -> Estate:
                     if raw.get("receipt_root") is not None
                     else None
                 ),
-                inventory_roots=tuple(
-                    _required_text(root, f"estate.devices[{index}].inventory_roots[]")
-                    for root in raw.get("inventory_roots", ["~/.rapp/twins"])
+                inventory_roots=_string_array(
+                    raw.get("inventory_roots", ["~/.rapp/twins"]),
+                    f"estate.devices[{index}].inventory_roots",
+                    require_nonempty=True,
                 ),
-                catalog_roots=tuple(
-                    _required_text(root, f"estate.devices[{index}].catalog_roots[]")
-                    for root in raw.get("catalog_roots", [])
+                catalog_roots=_string_array(
+                    raw.get("catalog_roots", []),
+                    f"estate.devices[{index}].catalog_roots",
                 ),
-                audit_roots=tuple(
-                    _required_text(root, f"estate.devices[{index}].audit_roots[]")
-                    for root in raw.get("audit_roots", [])
+                audit_roots=_string_array(
+                    raw.get("audit_roots", []),
+                    f"estate.devices[{index}].audit_roots",
                 ),
                 neighborhoods=tuple(neighborhoods),
                 note=(
@@ -528,7 +546,17 @@ def run_estate_device(action: str, payload: dict[str, Any]) -> dict[str, Any]:
                 {
                     "estate": catalog.id,
                     "state": "observed",
-                    "cells": len(catalog.cells),
+                    "cells": [
+                        {
+                            "id": cell.id,
+                            "label": cell.label,
+                            "pane_id": None,
+                            "agent_status": "observed",
+                            "managed": False,
+                            "live": False,
+                        }
+                        for cell in catalog.cells
+                    ],
                 }
                 for catalog in discover_catalogs(
                     [
@@ -548,7 +576,17 @@ def run_estate_device(action: str, payload: dict[str, Any]) -> dict[str, Any]:
                 {
                     "estate": catalog.id,
                     "state": "down",
-                    "cells": len(catalog.cells),
+                    "cells": [
+                        {
+                            "id": cell.id,
+                            "label": cell.label,
+                            "pane_id": None,
+                            "agent_status": "stopped",
+                            "managed": False,
+                            "live": False,
+                        }
+                        for cell in catalog.cells
+                    ],
                 }
                 for catalog in discover_catalogs(catalog_roots)
             ],

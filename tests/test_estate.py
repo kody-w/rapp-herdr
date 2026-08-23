@@ -157,6 +157,21 @@ class EstateTests(unittest.TestCase):
             with self.assertRaisesRegex(RappHerdrError, "unsafe SSH alias"):
                 load_estate(path)
 
+    def test_root_fields_require_arrays_and_inventory_is_nonempty(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = create_estate(Path(directory) / "estate.json")
+            value = json.loads(path.read_text())
+            value["devices"][0]["audit_roots"] = "/"
+            write_json(path, value)
+            with self.assertRaisesRegex(RappHerdrError, "audit_roots must be an array"):
+                load_estate(path)
+
+            value["devices"][0]["audit_roots"] = []
+            value["devices"][0]["inventory_roots"] = []
+            write_json(path, value)
+            with self.assertRaisesRegex(RappHerdrError, "at least one path"):
+                load_estate(path)
+
     @patch("rapp_herdr.estate.subprocess.run")
     def test_remote_invocation_contains_only_encoded_payload(self, run) -> None:
         with tempfile.TemporaryDirectory() as directory:

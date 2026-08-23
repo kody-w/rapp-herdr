@@ -429,9 +429,9 @@ def add_probe_neighborhoods(
         raise RappHerdrError("not every seeded device exists in the estate manifest")
     if not changed:
         return {"ok": True, "changed": False, "devices": configured}
-    from .backup import import_estate_backup
+    from .backup import replace_estate_manifest
 
-    result = import_estate_backup(manifest_path, value)
+    result = replace_estate_manifest(manifest_path, value)
     return {
         "ok": True,
         "changed": True,

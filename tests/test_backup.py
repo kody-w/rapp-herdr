@@ -33,6 +33,14 @@ class BackupTests(unittest.TestCase):
             with self.assertRaisesRegex(RappHerdrError, "checksum"):
                 import_estate_backup(manifest, backup)
 
+    def test_ui_import_rejects_raw_unchecksummed_estate(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            manifest = create_estate(Path(directory) / "estate.json")
+            raw = json.loads(manifest.read_text())
+
+            with self.assertRaisesRegex(RappHerdrError, "backup must use schema"):
+                import_estate_backup(manifest, raw)
+
 
 if __name__ == "__main__":
     unittest.main()

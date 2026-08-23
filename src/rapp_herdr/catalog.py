@@ -540,7 +540,17 @@ class CatalogManager:
                         "ok": True,
                         "state": "down",
                         "managed": False,
-                        "cells": len(catalog.cells),
+                        "cells": [
+                            {
+                                "id": cell.id,
+                                "label": cell.label,
+                                "pane_id": None,
+                                "agent_status": "stopped",
+                                "managed": False,
+                                "live": False,
+                            }
+                            for cell in catalog.cells
+                        ],
                     }
                 )
             else:
