@@ -284,6 +284,10 @@ class ManagerTests(unittest.TestCase):
                 "agent_status": "unknown",
             }
 
+            status = manager.status(topology.neighborhood)
+            self.assertFalse(status["managed"])
+            self.assertEqual(status["state"], "diverged")
+
             with self.assertRaisesRegex(RappHerdrError, "pane set differs"):
                 manager.down(topology.neighborhood)
 

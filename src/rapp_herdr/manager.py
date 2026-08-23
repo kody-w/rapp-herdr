@@ -717,8 +717,14 @@ class NeighborhoodManager:
                 "members": [],
             }
         panes = {value.get("pane_id"): value for value in self.client.panes(workspace_id)}
+        expected_pane_ids = {
+            member.get("pane_id")
+            for member in members
+            if isinstance(member, dict)
+        }
+        pane_set_matches = set(panes) == expected_pane_ids
         member_status: list[dict[str, Any]] = []
-        managed = True
+        managed = pane_set_matches
         for member in members:
             if not isinstance(member, dict):
                 managed = False
@@ -765,6 +771,11 @@ class NeighborhoodManager:
             "managed": managed,
             "workspace_id": workspace_id,
             "workspace_label": expected_label,
+            "reason": (
+                None
+                if pane_set_matches
+                else "workspace pane set differs from the receipt"
+            ),
             "members": member_status,
         }
 

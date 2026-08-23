@@ -1,13 +1,78 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import signal
 import subprocess
 import sys
+import tempfile
+import zipfile
 from pathlib import Path
 
 from .lifecycle import HerdrReporter
 from .model import RappHerdrError
+
+
+def _bootstrap_artifact() -> Path:
+    package = Path(__file__).resolve().parent
+    sources = sorted(package.rglob("*.py"))
+    digest = hashlib.sha256()
+    for source in sources:
+        relative = source.relative_to(package)
+        digest.update(str(relative).encode())
+        digest.update(b"\0")
+        digest.update(source.read_bytes())
+        digest.update(b"\0")
+    configured_root = os.environ.get("RAPP_HERDR_BOOTSTRAP_ROOT")
+    root = (
+        Path(configured_root).expanduser()
+        if configured_root
+        else Path.home() / ".cache" / "rapp-herdr" / "bootstrap"
+    )
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    artifact = root / f"rapp-herdr-{digest.hexdigest()}.zip"
+    if artifact.is_file():
+        return artifact
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{artifact.name}.",
+        dir=root,
+    )
+    os.close(descriptor)
+    temporary = Path(temporary_name)
+    try:
+        with zipfile.ZipFile(temporary, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
+            for source in sources:
+                bundle.write(
+                    source,
+                    arcname=str(Path("rapp_herdr") / source.relative_to(package)),
+                )
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, artifact)
+        os.chmod(artifact, 0o600)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+    return artifact
+
+
+def _forward_signal(child: subprocess.Popen, signum: int, *, windows: bool) -> None:
+    if child.poll() is not None:
+        return
+    if windows:
+        child.terminate()
+    else:
+        child.send_signal(signum)
+
+
+def _terminate_and_wait(child: subprocess.Popen) -> None:
+    if child.poll() is not None:
+        return
+    child.terminate()
+    try:
+        child.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        child.kill()
+        child.wait(timeout=10)
 
 
 def supervise(
@@ -33,14 +98,9 @@ def supervise(
     )
     reporter.start(strict=True)
 
-    source_root = Path(__file__).resolve().parents[1]
+    bootstrap_artifact = _bootstrap_artifact()
     environment = os.environ.copy()
-    existing_python_path = environment.get("PYTHONPATH")
-    environment["PYTHONPATH"] = (
-        str(source_root)
-        if not existing_python_path
-        else os.pathsep.join([str(source_root), existing_python_path])
-    )
+    environment["PYTHONPATH"] = str(bootstrap_artifact)
     command = [
         str(python),
         "-m",
@@ -72,10 +132,12 @@ def supervise(
         raise RappHerdrError(f"cannot start Twin brainstem: {exc}") from exc
 
     previous_handlers: dict[int, object] = {}
+    interrupted_by: int | None = None
 
     def forward(signum, _frame) -> None:
-        if child.poll() is None:
-            child.send_signal(signum)
+        nonlocal interrupted_by
+        interrupted_by = signum
+        _forward_signal(child, signum, windows=os.name == "nt")
 
     for signal_name in ("SIGINT", "SIGTERM", "SIGHUP"):
         signum = getattr(signal, signal_name, None)
@@ -84,10 +146,14 @@ def supervise(
         previous_handlers[signum] = signal.getsignal(signum)
         signal.signal(signum, forward)
     try:
-        return_code = child.wait()
+        try:
+            return_code = child.wait()
+        except BaseException:
+            _terminate_and_wait(child)
+            raise
         if return_code != 0:
             reporter.state("blocked", f"Twin brainstem exited with code {return_code}")
-        return return_code
+        return 128 + interrupted_by if interrupted_by is not None else return_code
     finally:
         for signum, previous in previous_handlers.items():
             signal.signal(signum, previous)

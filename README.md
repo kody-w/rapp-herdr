@@ -112,10 +112,13 @@ runtime control plane.
 - No RAPP manifest, membership roster, Twin kernel, or Herdr source is edited.
 - Paths come only from operator-selected estate roots, never from remote
   membership metadata.
+- Twin interpreters receive a package-only `rapp-herdr` bootstrap zip, never
+  the controller interpreter's full `site-packages` or inherited `PYTHONPATH`.
 - Duplicate identities and duplicate canonical workspaces fail before launch.
 - Receipts are host/session scoped, atomically replaced, and mode `0600`.
 - Re-running `up` reconciles the existing receipt instead of duplicating
-  processes.
+  processes; changed membership, runtime requirements, or launch options fail
+  closed and require an explicit `down` then `up`.
 - `down` closes only a workspace whose opaque Herdr IDs and pane set still
   match the receipt.
 
