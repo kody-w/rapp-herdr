@@ -163,8 +163,9 @@ class ManagerTests(unittest.TestCase):
         "rapp_herdr.manager.prepare_brainstem_python",
         return_value=Path("/tmp/python"),
     )
+    @patch("rapp_herdr.manager._internal_twin_command", return_value="run-twin")
     def test_four_twins_create_one_workspace_and_four_tabs(
-        self, _prepare, _ports, _health
+        self, internal_command, _prepare, _ports, _health
     ) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -181,7 +182,13 @@ class ManagerTests(unittest.TestCase):
                 len([item for item in client.commands if item[0] == "run"]),
                 4,
             )
-            self.assertIn("/custom/herdr", client.commands[1][2])
+            self.assertEqual(internal_command.call_count, 4)
+            self.assertTrue(
+                all(
+                    call.kwargs["herdr_binary"] == "/custom/herdr"
+                    for call in internal_command.call_args_list
+                )
+            )
 
             second = manager.up(topology, base_port=7081)
             self.assertTrue(second["managed"])
