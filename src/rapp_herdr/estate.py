@@ -1775,6 +1775,18 @@ class EstateManager:
                         == probe_rappid(device.id)
                     )
                     target = device.probe_target if is_probe else None
+                    runtime_probe_target = (
+                        member.get("probe_relay_target")
+                        if is_probe
+                        else None
+                    )
+                    probe_target_matches = bool(
+                        not is_probe
+                        or (
+                            target is not None
+                            and runtime_probe_target == target.payload()
+                        )
+                    )
                     name = target.name if target else member.get("name")
                     rappid = target.rappid if target else member.get("rappid")
                     identity = str(rappid or name or member.get("pane_id"))
@@ -1785,7 +1797,10 @@ class EstateManager:
                         member.get("healthy") and member.get("live")
                         and (
                             not is_probe
-                            or member.get("probe_target_ready") is True
+                            or (
+                                member.get("probe_target_ready") is True
+                                and probe_target_matches
+                            )
                         )
                     )
                     candidates.append(
@@ -1805,6 +1820,9 @@ class EstateManager:
                                 else "ssh-posix"
                             ),
                             "via_probe": is_probe,
+                            "configuration_drift": bool(
+                                is_probe and not probe_target_matches
+                            ),
                             "ui": (
                                 configured.buddy_ui
                                 if configured is not None

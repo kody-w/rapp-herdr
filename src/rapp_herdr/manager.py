@@ -862,6 +862,22 @@ class NeighborhoodManager:
                         == "rapp-herdr-persistence-probe"
                         else None
                     ),
+                    "probe_relay_target": (
+                        health_details.get("probe", {}).get("relay_target")
+                        if isinstance(health_details, dict)
+                        and health_details.get("service")
+                        == "rapp-herdr-persistence-probe"
+                        and isinstance(health_details.get("probe"), dict)
+                        else None
+                    ),
+                    "probe_target_revision": (
+                        health_details.get("probe", {}).get("target_revision")
+                        if isinstance(health_details, dict)
+                        and health_details.get("service")
+                        == "rapp-herdr-persistence-probe"
+                        and isinstance(health_details.get("probe"), dict)
+                        else None
+                    ),
                     "managed": matches_owner,
                     "live": live,
                 }

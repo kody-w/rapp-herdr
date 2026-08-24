@@ -428,6 +428,13 @@ class EstateTests(unittest.TestCase):
                                 "live": True,
                                 "probe_target_healthy": True,
                                 "probe_target_ready": True,
+                                "probe_relay_target": {
+                                    "name": "Remote Twin",
+                                    "url": "http://127.0.0.1:7081",
+                                    "rappid": (
+                                        "rappid:@test/remote:" + "b" * 64
+                                    ),
+                                },
                                 "agent_status": "idle",
                             }]
                         }
@@ -570,6 +577,7 @@ class EstateTests(unittest.TestCase):
                                 "live": True,
                                 "probe_target_healthy": True,
                                 "probe_target_ready": True,
+                                "probe_relay_target": target,
                                 "agent_status": "done",
                             }],
                         },
@@ -585,6 +593,56 @@ class EstateTests(unittest.TestCase):
 
             self.assertEqual(buddy["presence"], "online")
             self.assertTrue(buddy["via_probe"])
+
+    def test_probe_runtime_target_drift_is_offline_and_not_routable(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = create_estate(Path(directory) / "estate.json")
+            manifest = json.loads(path.read_text())
+            manifest["devices"][1]["neighborhoods"][0].update({
+                "manifest": PROBE_NEIGHBORHOOD_MANIFEST,
+                "managed_by": PROBE_SCHEMA,
+            })
+            write_json(path, manifest)
+            manager = EstateManager(load_estate(path), ssh_binary="/usr/bin/ssh")
+            status = {
+                "ok": True,
+                "devices": [{
+                    "device": "remote-mac",
+                    "neighborhoods": [{
+                        "manifest": (
+                            "/Users/remote/.rapp/neighborhoods/"
+                            "rapp-herdr-persistence-probe/neighborhood.json"
+                        ),
+                        "result": {
+                            "members": [{
+                                "name": "Persistence Probe - remote-mac",
+                                "rappid": probe_rappid("remote-mac"),
+                                "url": "http://127.0.0.1:7199",
+                                "healthy": True,
+                                "live": True,
+                                "probe_target_ready": True,
+                                "probe_relay_target": {
+                                    "name": "Previous Twin",
+                                    "url": "http://127.0.0.1:7099",
+                                    "rappid": "rappid:@test/previous:" + "f" * 64,
+                                },
+                                "agent_status": "done",
+                            }],
+                        },
+                    }],
+                }],
+            }
+
+            with patch.object(manager, "run", return_value=status):
+                buddy = manager.list_buddies()["buddies"][0]
+                with self.assertRaisesRegex(RappHerdrError, "offline"):
+                    manager.chat_buddy(
+                        buddy_id=buddy["id"],
+                        message="must not reach the previous Twin",
+                    )
+
+            self.assertEqual(buddy["presence"], "offline")
+            self.assertTrue(buddy["configuration_drift"])
 
     def test_unsafe_ssh_alias_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
