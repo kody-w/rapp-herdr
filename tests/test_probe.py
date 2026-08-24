@@ -154,6 +154,14 @@ class ProbeTests(unittest.TestCase):
             def log_message(self, *_args) -> None:
                 pass
 
+            def do_GET(self) -> None:
+                value = json.dumps({"status": "ok"}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(value)))
+                self.end_headers()
+                self.wfile.write(value)
+
             def do_POST(self) -> None:
                 size = int(self.headers.get("Content-Length") or 0)
                 body = json.loads(self.rfile.read(size))
@@ -223,6 +231,13 @@ class ProbeTests(unittest.TestCase):
                         time.sleep(0.1)
                 else:
                     self.fail("generated persistence probe did not start")
+                with urllib.request.urlopen(
+                    f"http://127.0.0.1:{probe_port}/health",
+                    timeout=2,
+                ) as response:
+                    initial_health = json.loads(response.read())
+                self.assertTrue(initial_health["target_healthy"])
+                self.assertFalse(initial_health["target_ready"])
                 request = urllib.request.Request(
                     f"http://127.0.0.1:{probe_port}/chat",
                     data=json.dumps({"user_input": "relay this"}).encode(),
@@ -242,6 +257,30 @@ class ProbeTests(unittest.TestCase):
                     "Real Local Twin",
                 )
                 self.assertEqual(value["probe"]["relay_count"], 1)
+                self.assertEqual(
+                    value["relay"]["target_revision"],
+                    value["probe"]["target_revision"],
+                )
+                state_path = (
+                    Path(seeded["workspace"])
+                    / ".brainstem_data"
+                    / "persistence_probe.json"
+                )
+                state = json.loads(state_path.read_text())
+                state["messages"] = [
+                    {"content": "x" * 8_000, "recorded_at": "test"}
+                    for _ in range(100)
+                ]
+                state_path.write_text(json.dumps(state))
+                with urllib.request.urlopen(
+                    f"http://127.0.0.1:{probe_port}/health",
+                    timeout=2,
+                ) as response:
+                    health_body = response.read()
+                health = json.loads(health_body)
+                self.assertLess(len(health_body), 64 * 1024)
+                self.assertNotIn("messages", health["probe"])
+                self.assertTrue(health["target_ready"])
 
                 slow_payload = dict(payload, message="slow relay")
                 slow = run_probe_device("mark", slow_payload)
@@ -253,6 +292,12 @@ class ProbeTests(unittest.TestCase):
                 self.assertFalse(failed["ok"])
                 self.assertTrue(failed["reachable"])
                 self.assertFalse(failed["relay"]["responded"])
+                with urllib.request.urlopen(
+                    f"http://127.0.0.1:{probe_port}/health",
+                    timeout=2,
+                ) as response:
+                    failed_health = json.loads(response.read())
+                self.assertFalse(failed_health["target_ready"])
         finally:
             if process is not None:
                 process.terminate()

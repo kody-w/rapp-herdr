@@ -1785,7 +1785,7 @@ class EstateManager:
                         member.get("healthy") and member.get("live")
                         and (
                             not is_probe
-                            or member.get("probe_target_healthy") is True
+                            or member.get("probe_target_ready") is True
                         )
                     )
                     candidates.append(
@@ -1833,8 +1833,9 @@ class EstateManager:
         for candidate in sorted(
             candidates,
             key=lambda item: (
-                bool(item["via_probe"]),
+                item["presence"] != "online",
                 not bool(item["_observed"]),
+                bool(item["via_probe"]),
             ),
         ):
             key = (

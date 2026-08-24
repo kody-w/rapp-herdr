@@ -855,6 +855,13 @@ class NeighborhoodManager:
                         == "rapp-herdr-persistence-probe"
                         else None
                     ),
+                    "probe_target_ready": (
+                        health_details.get("target_ready")
+                        if isinstance(health_details, dict)
+                        and health_details.get("service")
+                        == "rapp-herdr-persistence-probe"
+                        else None
+                    ),
                     "managed": matches_owner,
                     "live": live,
                 }

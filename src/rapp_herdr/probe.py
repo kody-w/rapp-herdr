@@ -84,14 +84,44 @@ def health():
     if isinstance(target, dict):
         try:
             with urllib.request.urlopen(target["url"] + "/health", timeout=1) as response:
-                target_healthy = 200 <= int(response.status) < 300
-        except (OSError, urllib.error.URLError):
+                payload = response.read(64 * 1024 + 1)
+                value = json.loads(payload) if len(payload) <= 64 * 1024 else None
+                target_healthy = (
+                    200 <= int(response.status) < 300
+                    and isinstance(value, dict)
+                    and value.get("status") in {"ok", "ready"}
+                )
+        except (
+            OSError,
+            ValueError,
+            urllib.error.URLError,
+            json.JSONDecodeError,
+        ):
             target_healthy = False
+    last_relay = state.get("last_relay")
+    target_revision = int(state.get("target_revision", 0))
+    target_ready = bool(
+        target_healthy
+        and isinstance(last_relay, dict)
+        and last_relay.get("responded") is True
+        and last_relay.get("target_revision") == target_revision
+    )
+    probe = {
+        "schema": state.get("schema"),
+        "device_id": state.get("device_id"),
+        "rappid": state.get("rappid"),
+        "survival_marker": state.get("survival_marker"),
+        "relay_target": target,
+        "target_revision": target_revision,
+        "relay_count": int(state.get("relay_count", 0)),
+        "last_relay": last_relay,
+    }
     return jsonify({
         "status": "ok",
         "service": "rapp-herdr-persistence-probe",
         "target_healthy": target_healthy,
-        "probe": state,
+        "target_ready": target_ready,
+        "probe": probe,
     })
 
 def relay_turn(target, user_input, session_id):
@@ -155,6 +185,7 @@ def chat():
                 "configured_target_rappid": target.get("rappid"),
                 "sent_at": sent_at,
                 "received_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "target_revision": target_revision,
                 "responded": True,
                 "response_sha256": hashlib.sha256(response_text.encode()).hexdigest(),
             }
@@ -190,6 +221,7 @@ def chat():
                 "configured_target_rappid": target.get("rappid"),
                 "sent_at": sent_at,
                 "received_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "target_revision": target_revision,
                 "responded": False,
                 "error": type(exc).__name__,
             }

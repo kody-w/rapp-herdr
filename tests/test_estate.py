@@ -427,6 +427,7 @@ class EstateTests(unittest.TestCase):
                                 "healthy": True,
                                 "live": True,
                                 "probe_target_healthy": True,
+                                "probe_target_ready": True,
                                 "agent_status": "idle",
                             }]
                         }
@@ -524,6 +525,66 @@ class EstateTests(unittest.TestCase):
             self.assertEqual(map_maker["presence"], "offline")
             self.assertEqual(map_maker["status"], "offline")
             self.assertEqual(map_maker["ui"], "rapplication")
+
+    def test_healthy_probe_route_beats_offline_buddy_placeholder(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = create_estate(Path(directory) / "estate.json")
+            manifest = json.loads(path.read_text())
+            target = manifest["devices"][0]["probe_target"]
+            manifest["devices"][0]["neighborhoods"].extend([
+                {
+                    "manifest": "/tmp/local-twin/neighborhood.json",
+                    "estate_roots": ["~/.rapp/twins"],
+                    "base_port": 7085,
+                    "managed_by": "rapp-herdr-buddy/1.0",
+                    "buddy": {
+                        "name": target["name"],
+                        "rappid": target["rappid"],
+                        "ui": "chat",
+                    },
+                },
+                {
+                    "manifest": PROBE_NEIGHBORHOOD_MANIFEST,
+                    "estate_roots": ["~/.rapp/twins"],
+                    "base_port": 7199,
+                    "managed_by": PROBE_SCHEMA,
+                },
+            ])
+            write_json(path, manifest)
+            manager = EstateManager(load_estate(path))
+            status = {
+                "ok": True,
+                "devices": [{
+                    "device": "local",
+                    "neighborhoods": [{
+                        "manifest": (
+                            "/Users/test/.rapp/neighborhoods/"
+                            "rapp-herdr-persistence-probe/neighborhood.json"
+                        ),
+                        "result": {
+                            "members": [{
+                                "name": "Persistence Probe - local",
+                                "rappid": probe_rappid("local"),
+                                "url": "http://127.0.0.1:7199",
+                                "healthy": True,
+                                "live": True,
+                                "probe_target_healthy": True,
+                                "probe_target_ready": True,
+                                "agent_status": "done",
+                            }],
+                        },
+                    }],
+                }],
+            }
+
+            with patch.object(manager, "run", return_value=status):
+                buddy = next(
+                    item for item in manager.list_buddies()["buddies"]
+                    if item["rappid"] == target["rappid"]
+                )
+
+            self.assertEqual(buddy["presence"], "online")
+            self.assertTrue(buddy["via_probe"])
 
     def test_unsafe_ssh_alias_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
