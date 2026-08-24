@@ -1,0 +1,1168 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>RAPP-Herdr Estate</title>
+  <script>
+    (() => {
+      const param = new URLSearchParams(window.location.search).get("scoutTheme");
+      const theme =
+        param || (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+      document.documentElement.setAttribute("data-theme", theme);
+    })();
+  </script>
+  <style>
+    :root {
+      color-scheme: light;
+      --cp-bg: #f7f4ef;
+      --cp-bg-elevated: #fcfbf8;
+      --cp-surface: #ffffff;
+      --cp-surface-soft: #f5f5f5;
+      --cp-border: #dedede;
+      --cp-border-strong: #919191;
+      --cp-text: #242424;
+      --cp-text-muted: #5c5c5c;
+      --cp-text-soft: #6f6f6f;
+      --cp-accent: #b11f4b;
+      --cp-accent-hover: #9a1a41;
+      --cp-accent-soft: rgba(177, 31, 75, 0.08);
+      --cp-accent-fg: #ffffff;
+      --cp-success: #16a34a;
+      --cp-danger: #dc2626;
+      --cp-warning: #f59e0b;
+      --cp-link: #0078d4;
+      --cp-shadow: 0 18px 48px rgba(0, 0, 0, 0.12);
+      --cp-overlay: rgba(255, 255, 255, 0.8);
+      --cp-panel: rgba(255, 255, 255, 0.86);
+      --cp-panel-strong: rgba(255, 255, 255, 0.96);
+      --cp-sheen: rgba(255, 255, 255, 0.55);
+      --cp-highlight: rgba(177, 31, 75, 0.12);
+    }
+    html[data-theme="dark"] {
+      color-scheme: dark;
+      --cp-bg: #3d3b3a;
+      --cp-bg-elevated: #343231;
+      --cp-surface: #292929;
+      --cp-surface-soft: #2e2e2e;
+      --cp-border: #474747;
+      --cp-border-strong: #5f5f5f;
+      --cp-text: #dedede;
+      --cp-text-muted: #919191;
+      --cp-text-soft: #b0b0b0;
+      --cp-accent: #fd8ea1;
+      --cp-accent-hover: #fb7b91;
+      --cp-accent-soft: rgba(253, 142, 161, 0.14);
+      --cp-accent-fg: #1a1a1a;
+      --cp-success: #4ade80;
+      --cp-danger: #f87171;
+      --cp-warning: #fbbf24;
+      --cp-link: #4da6ff;
+      --cp-shadow: 0 18px 48px rgba(0, 0, 0, 0.32);
+      --cp-overlay: rgba(41, 41, 41, 0.88);
+      --cp-panel: rgba(41, 41, 41, 0.72);
+      --cp-panel-strong: rgba(41, 41, 41, 0.96);
+      --cp-sheen: rgba(255, 255, 255, 0.04);
+      --cp-highlight: rgba(253, 142, 161, 0.12);
+    }
+    * { box-sizing: border-box; }
+    html, body { min-height: 100%; }
+    body {
+      margin: 0;
+      background: var(--cp-bg);
+      color: var(--cp-text);
+      font-family: "Segoe UI", Aptos, Calibri, -apple-system, BlinkMacSystemFont, sans-serif;
+    }
+    button, input { font: inherit; }
+    button:focus-visible, input:focus-visible, summary:focus-visible {
+      outline: 2px solid var(--cp-accent);
+      outline-offset: 2px;
+    }
+    .shell {
+      width: min(1600px, 100%);
+      margin: 0 auto;
+      padding: 24px;
+    }
+    .topbar {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 24px;
+      margin-bottom: 20px;
+    }
+    .eyebrow {
+      margin: 0 0 4px;
+      color: var(--cp-accent);
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+    }
+    h1 {
+      margin: 0;
+      font-size: clamp(28px, 4vw, 48px);
+      line-height: 1.08;
+      letter-spacing: -0.035em;
+    }
+    .subtitle {
+      max-width: 760px;
+      margin: 8px 0 0;
+      color: var(--cp-text-muted);
+      font-size: 15px;
+      line-height: 1.5;
+    }
+    .actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+    .button {
+      border: 1px solid var(--cp-border);
+      border-radius: 0.625rem;
+      padding: 9px 14px;
+      background: var(--cp-surface);
+      color: var(--cp-text);
+      cursor: pointer;
+      font-weight: 600;
+    }
+    .button:hover { border-color: var(--cp-border-strong); }
+    .button.primary {
+      border-color: var(--cp-accent);
+      background: var(--cp-accent);
+      color: var(--cp-accent-fg);
+    }
+    .button.primary:hover { background: var(--cp-accent-hover); }
+    .button:disabled { cursor: wait; opacity: 0.65; }
+    .file-input { display: none; }
+    .live {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      min-height: 38px;
+      padding: 0 12px;
+      border: 1px solid var(--cp-border);
+      border-radius: 0.625rem;
+      background: var(--cp-surface);
+      color: var(--cp-text-muted);
+      font-size: 13px;
+    }
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--cp-border-strong);
+      flex: 0 0 auto;
+    }
+    .dot.good { background: var(--cp-success); }
+    .dot.warn { background: var(--cp-warning); }
+    .dot.bad { background: var(--cp-danger); }
+    .metrics {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(120px, 1fr));
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+    .metric, .panel, .device {
+      border: 1px solid var(--cp-border);
+      background: var(--cp-surface);
+      box-shadow: 0 1px 2px var(--cp-border);
+    }
+    .metric {
+      min-height: 92px;
+      padding: 16px;
+      border-radius: 16px;
+    }
+    .metric-value {
+      display: block;
+      font-size: 28px;
+      line-height: 1;
+      font-weight: 750;
+      letter-spacing: -0.025em;
+    }
+    .metric-label {
+      display: block;
+      margin-top: 8px;
+      color: var(--cp-text-muted);
+      font-size: 12px;
+      font-weight: 600;
+    }
+    .toolbar {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 12px;
+      margin-bottom: 16px;
+      border: 1px solid var(--cp-border);
+      border-radius: 0.625rem;
+      background: var(--cp-bg-elevated);
+    }
+    .search {
+      width: min(460px, 100%);
+      border: 1px solid var(--cp-border);
+      border-radius: 0.625rem;
+      padding: 9px 12px;
+      background: var(--cp-surface);
+      color: var(--cp-text);
+    }
+    .timestamp {
+      margin-left: auto;
+      color: var(--cp-text-muted);
+      font-family: Consolas, "Courier New", Courier, monospace;
+      font-size: 12px;
+    }
+    .select {
+      border: 1px solid var(--cp-border);
+      border-radius: 0.625rem;
+      padding: 9px 12px;
+      background: var(--cp-surface);
+      color: var(--cp-text);
+    }
+    .global {
+      margin-bottom: 16px;
+      padding: 16px;
+      border-radius: 16px;
+    }
+    .global-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      gap: 16px;
+      margin-bottom: 12px;
+    }
+    .global-head h2 { margin: 0; font-size: 18px; }
+    .global-head span { color: var(--cp-text-muted); font-size: 12px; }
+    .global-section + .global-section { margin-top: 16px; }
+    .global-section h3 {
+      margin: 0 0 8px;
+      color: var(--cp-text-muted);
+      font-size: 12px;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+    }
+    .global-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 8px;
+    }
+    .entity {
+      min-height: 94px;
+      padding: 12px;
+      border: 1px solid var(--cp-border);
+      border-radius: 0.625rem;
+      background: var(--cp-surface-soft);
+      cursor: pointer;
+    }
+    .entity:hover { border-color: var(--cp-border-strong); }
+    .entity.active {
+      border-color: var(--cp-accent);
+      background: var(--cp-accent-soft);
+    }
+    .entity-kind {
+      color: var(--cp-accent);
+      font-size: 10px;
+      font-weight: 750;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+    .entity-title {
+      margin: 5px 0 3px;
+      overflow: hidden;
+      font-size: 13px;
+      font-weight: 700;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .entity-subtitle {
+      overflow: hidden;
+      color: var(--cp-text-muted);
+      font-family: Consolas, "Courier New", Courier, monospace;
+      font-size: 10px;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .entity-footer {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      margin-top: 8px;
+      color: var(--cp-text-muted);
+      font-size: 10px;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 16px;
+    }
+    .device {
+      border-radius: 16px;
+      overflow: hidden;
+    }
+    .device.active {
+      border-color: var(--cp-accent);
+      box-shadow: 0 0 0 2px var(--cp-accent-soft);
+    }
+    .device-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 12px;
+      padding: 16px;
+      border-bottom: 1px solid var(--cp-border);
+      background: var(--cp-bg-elevated);
+    }
+    .device-title {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin: 0;
+      font-size: 18px;
+    }
+    .device-meta {
+      margin: 5px 0 0 18px;
+      color: var(--cp-text-muted);
+      font-size: 12px;
+    }
+    .badges {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      justify-content: flex-end;
+    }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      min-height: 24px;
+      padding: 3px 8px;
+      border: 1px solid var(--cp-border);
+      border-radius: 0.625rem;
+      background: var(--cp-surface);
+      color: var(--cp-text-muted);
+      font-size: 11px;
+      font-weight: 700;
+    }
+    .badge.good { color: var(--cp-success); }
+    .badge.warn { color: var(--cp-warning); }
+    .badge.bad { color: var(--cp-danger); }
+    .device-body { padding: 12px 16px 16px; }
+    .shape {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 8px;
+      margin-bottom: 12px;
+    }
+    .shape-item {
+      padding: 10px;
+      border: 1px solid var(--cp-border);
+      border-radius: 0.625rem;
+      background: var(--cp-surface-soft);
+    }
+    .shape-item strong {
+      display: block;
+      font-size: 17px;
+    }
+    .shape-item span {
+      color: var(--cp-text-muted);
+      font-size: 10px;
+    }
+    details {
+      border-top: 1px solid var(--cp-border);
+    }
+    details:first-of-type { border-top: 0; }
+    summary {
+      padding: 10px 0;
+      cursor: pointer;
+      color: var(--cp-text);
+      font-size: 13px;
+      font-weight: 650;
+      list-style: none;
+    }
+    summary::-webkit-details-marker { display: none; }
+    summary::before {
+      content: "+";
+      display: inline-block;
+      width: 18px;
+      color: var(--cp-accent);
+    }
+    details[open] summary::before { content: "-"; }
+    .list {
+      display: grid;
+      gap: 6px;
+      padding: 0 0 12px 18px;
+    }
+    .row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      min-height: 34px;
+      padding: 7px 9px;
+      border: 1px solid var(--cp-border);
+      border-radius: 0.625rem;
+      background: var(--cp-surface-soft);
+      font-size: 12px;
+    }
+    .row-main {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .row-sub {
+      display: block;
+      margin-top: 2px;
+      color: var(--cp-text-muted);
+      font-family: Consolas, "Courier New", Courier, monospace;
+      font-size: 10px;
+    }
+    .error {
+      margin: 0 0 16px;
+      padding: 12px 14px;
+      border: 1px solid var(--cp-danger);
+      border-radius: 0.625rem;
+      background: var(--cp-surface);
+      color: var(--cp-danger);
+      white-space: pre-wrap;
+    }
+    .empty {
+      padding: 18px;
+      color: var(--cp-text-muted);
+      text-align: center;
+    }
+    .commands {
+      margin-top: 16px;
+      padding: 16px;
+      border-radius: 16px;
+    }
+    .commands h2 { margin: 0 0 8px; font-size: 16px; }
+    code {
+      font-family: Consolas, "Courier New", Courier, monospace;
+      font-size: 12px;
+    }
+    .command-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 8px;
+    }
+    .command {
+      display: block;
+      padding: 10px;
+      border: 1px solid var(--cp-border);
+      border-radius: 0.625rem;
+      background: var(--cp-surface-soft);
+      overflow: auto;
+      white-space: nowrap;
+    }
+    .loading .dot { animation: pulse 1s ease-in-out infinite alternate; }
+    @keyframes pulse { from { opacity: 0.35; } to { opacity: 1; } }
+    @media (max-width: 1100px) {
+      .metrics { grid-template-columns: repeat(3, minmax(120px, 1fr)); }
+      .grid { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 720px) {
+      .shell { padding: 16px; }
+      .topbar { flex-direction: column; }
+      .actions { justify-content: flex-start; }
+      .metrics { grid-template-columns: repeat(2, minmax(110px, 1fr)); }
+      .shape { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .toolbar { align-items: stretch; flex-direction: column; }
+      .timestamp { margin-left: 0; }
+      .command-grid { grid-template-columns: 1fr; }
+      .global-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">RAPP / HERDR</p>
+        <h1 id="estateName">Local Network AI Estate</h1>
+        <p class="subtitle">
+          Live topology from Herdr sessions, RAPP neighborhoods, estate catalogs,
+          Twin inventories, and operator-declared device reachability.
+        </p>
+      </div>
+      <div class="actions">
+        <div class="live loading" id="liveState">
+          <span class="dot" id="liveDot"></span>
+          <span id="liveText">Connecting</span>
+        </div>
+        <button class="button" id="exportBackupButton" type="button">Export backup</button>
+        <button class="button" id="importBackupButton" type="button">Import backup</button>
+        <input
+          class="file-input"
+          id="backupFile"
+          type="file"
+          accept="application/json,.json"
+          aria-label="Choose an estate backup to import"
+        />
+        <button class="button primary" id="refreshButton" type="button">Refresh shape</button>
+      </div>
+    </header>
+
+    <section class="metrics" id="metrics" aria-label="Estate summary"></section>
+
+    <section class="toolbar" aria-label="Filters">
+      <input class="search" id="search" type="search" placeholder="Filter devices, neighborhoods, factories, or Twins" />
+      <label class="live">
+        <input id="autoRefresh" type="checkbox" checked />
+        Auto-refresh
+      </label>
+      <label class="live">
+        <input id="followActive" type="checkbox" checked />
+        Follow active
+      </label>
+      <select class="select" id="elementFilter" aria-label="Element type">
+        <option value="all">All elements</option>
+        <option value="device">Devices</option>
+        <option value="runtime-neighborhood">Runtime neighborhoods</option>
+        <option value="catalog-neighborhood">Catalog neighborhoods</option>
+        <option value="twin">Twins</option>
+        <option value="organism">Other organisms</option>
+        <option value="asset">Audit assets</option>
+        <option value="service">Services</option>
+        <option value="job">Scheduled jobs</option>
+      </select>
+      <select class="select" id="groupBy" aria-label="Group elements">
+        <option value="type">Group by type</option>
+        <option value="device">Group by device</option>
+        <option value="compliance">Group by compliance</option>
+        <option value="status">Group by status</option>
+      </select>
+      <span class="timestamp" id="timestamp">Not observed yet</span>
+    </section>
+
+    <div class="error" id="error" hidden></div>
+    <section class="panel global" aria-label="Global estate index">
+      <div class="global-head">
+        <h2>Global estate index</h2>
+        <span id="globalSummary">Waiting for estate observation</span>
+      </div>
+      <div id="globalIndex"></div>
+    </section>
+    <section class="grid" id="devices" aria-live="polite"></section>
+
+    <section class="panel commands">
+      <h2>Command lane</h2>
+      <div class="command-grid">
+        <code class="command">rapp-herdr estate plan ~/.config/rapp-herdr/estate.json</code>
+        <code class="command">rapp-herdr estate up ~/.config/rapp-herdr/estate.json</code>
+        <code class="command">rapp-herdr estate status ~/.config/rapp-herdr/estate.json</code>
+        <code class="command">rapp-herdr estate down ~/.config/rapp-herdr/estate.json</code>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const ui = {
+      estateName: document.getElementById("estateName"),
+      metrics: document.getElementById("metrics"),
+      devices: document.getElementById("devices"),
+      refreshButton: document.getElementById("refreshButton"),
+      liveState: document.getElementById("liveState"),
+      liveDot: document.getElementById("liveDot"),
+      liveText: document.getElementById("liveText"),
+      timestamp: document.getElementById("timestamp"),
+      error: document.getElementById("error"),
+      search: document.getElementById("search"),
+      autoRefresh: document.getElementById("autoRefresh"),
+      followActive: document.getElementById("followActive"),
+      exportBackupButton: document.getElementById("exportBackupButton"),
+      importBackupButton: document.getElementById("importBackupButton"),
+      backupFile: document.getElementById("backupFile"),
+      elementFilter: document.getElementById("elementFilter"),
+      groupBy: document.getElementById("groupBy"),
+      globalIndex: document.getElementById("globalIndex"),
+      globalSummary: document.getElementById("globalSummary"),
+    };
+
+    let snapshot = null;
+    let loading = false;
+    let lastActiveKey = "";
+    const dashboardToken = new URLSearchParams(window.location.search).get("token") || "";
+
+    function node(tag, className, text) {
+      const element = document.createElement(tag);
+      if (className) element.className = className;
+      if (text !== undefined) element.textContent = String(text);
+      return element;
+    }
+
+    function badge(text, tone) {
+      return node("span", `badge ${tone || ""}`.trim(), text);
+    }
+
+    function toneFor(device) {
+      if (device.skipped) return "warn";
+      if (!device.reachable || !device.ok) return "bad";
+      return "good";
+    }
+
+    function listSection(title, items, renderer, open = false) {
+      const details = node("details");
+      details.open = open;
+      details.appendChild(node("summary", "", `${title} (${items.length})`));
+      const list = node("div", "list");
+      if (!items.length) {
+        list.appendChild(node("div", "empty", "None declared"));
+      } else {
+        items.forEach((item) => list.appendChild(renderer(item)));
+      }
+      details.appendChild(list);
+      return details;
+    }
+
+    function row(title, subtitle, status, tone) {
+      const element = node("div", "row");
+      const main = node("div", "row-main", title || "Unnamed");
+      if (subtitle) main.appendChild(node("span", "row-sub", subtitle));
+      element.appendChild(main);
+      if (status) element.appendChild(badge(status, tone));
+      return element;
+    }
+
+    function renderMetrics(data) {
+      const devices = data.devices || [];
+      const enabled = devices.filter((device) => !device.skipped);
+      const reachable = enabled.filter((device) => device.reachable).length;
+      const neighborhoods = devices.reduce(
+        (count, device) => count + (device.neighborhoods || []).length,
+        0
+      );
+      const catalogEstates = devices.reduce(
+        (count, device) => count + (((device.catalogs || {}).estates || []).length),
+        0
+      );
+      const workers = devices.reduce((count, device) => {
+        return count + (((device.catalogs || {}).estates || []).reduce((sum, estate) => {
+          if (Array.isArray(estate.cells)) return sum + estate.cells.length;
+          return sum + (Number(estate.cells) || 0);
+        }, 0));
+      }, 0);
+      const twins = devices.reduce(
+        (count, device) => count + (((device.inventory || {}).total) || 0),
+        0
+      );
+      const unassigned = devices.reduce(
+        (count, device) => count + (((device.inventory || {}).unassigned) || 0),
+        0
+      );
+      const auditedAssets = devices.reduce(
+        (count, device) => count + (((device.audit || {}).asset_count) || 0),
+        0
+      );
+      const services = devices.reduce(
+        (count, device) => count + (((device.audit || {}).service_count) || 0),
+        0
+      );
+      const values = [
+        [reachable, `reachable / ${enabled.length} enabled devices`],
+        [neighborhoods, "runtime neighborhoods"],
+        [catalogEstates, "estate workspaces"],
+        [workers, "neighborhood workers"],
+        [twins, "Twin identities"],
+        [unassigned, "unassigned Twins"],
+        [auditedAssets, "audited assets"],
+        [services, "active AI services"],
+      ];
+      ui.metrics.replaceChildren();
+      values.forEach(([value, label]) => {
+        const metric = node("article", "metric");
+        metric.appendChild(node("span", "metric-value", value));
+        metric.appendChild(node("span", "metric-label", label));
+        ui.metrics.appendChild(metric);
+      });
+    }
+
+    function activeWorkers(device) {
+      const active = [];
+      (device.neighborhoods || []).forEach((item) => {
+        const result = item.result || {};
+        (result.members || []).forEach((member) => {
+          if (member.agent_status === "working" || member.agent_status === "blocked") {
+            active.push({
+              key: `${device.device}:${member.pane_id}`,
+              label: member.name || member.rappid || "Twin",
+              detail: member.pane_id || item.manifest,
+              status: member.agent_status,
+            });
+          }
+        });
+      });
+      (((device.catalogs || {}).estates) || []).forEach((estate) => {
+        if (!Array.isArray(estate.cells)) return;
+        estate.cells.forEach((cell) => {
+          if (cell.agent_status === "working" || cell.agent_status === "blocked") {
+            active.push({
+              key: `${device.device}:${cell.pane_id}`,
+              label: cell.label || cell.id || estate.estate,
+              detail: `${estate.estate} / ${cell.pane_id || ""}`,
+              status: cell.agent_status,
+            });
+          }
+        });
+      });
+      return active;
+    }
+
+    function collectEntities(data) {
+      const entities = [];
+      (data.devices || []).forEach((device) => {
+        const deviceId = device.device || "unknown";
+        entities.push({
+          kind: "device",
+          title: deviceId,
+          subtitle: device.session || device.note || "",
+          device: deviceId,
+          status: device.skipped ? "disabled" : device.ok ? "healthy" : "attention",
+          compliance: "device",
+          active: false,
+        });
+        (device.neighborhoods || []).forEach((item) => {
+          const result = item.result || {};
+          entities.push({
+            kind: "runtime-neighborhood",
+            title: (item.manifest || "").split("/").slice(-2, -1)[0] || "neighborhood",
+            subtitle: item.manifest || "",
+            device: deviceId,
+            status: result.state || (item.ok ? "known" : "error"),
+            compliance: "runtime",
+            active: (result.members || []).some(
+              (member) => member.agent_status === "working" || member.agent_status === "blocked"
+            ),
+          });
+        });
+        (((device.catalogs || {}).estates) || []).forEach((estate) => {
+          if (Array.isArray(estate.cells)) {
+            estate.cells.forEach((cell) => {
+              entities.push({
+                kind: "catalog-neighborhood",
+                title: cell.label || cell.id || estate.estate,
+                subtitle: `${estate.estate} / ${cell.pane_id || ""}`,
+                device: deviceId,
+                status: cell.agent_status || estate.state || "known",
+                compliance: "catalog",
+                active: cell.agent_status === "working" || cell.agent_status === "blocked",
+              });
+            });
+          } else if (Number(estate.cells) > 0) {
+            entities.push({
+              kind: "catalog-neighborhood",
+              title: `${estate.estate} neighborhoods`,
+              subtitle: `${Number(estate.cells)} stopped or unmanaged`,
+              device: deviceId,
+              status: estate.state || "down",
+              compliance: "catalog",
+              active: false,
+            });
+          }
+        });
+        const inventory = device.inventory || {};
+        (inventory.twins || []).forEach((twin) => {
+          entities.push({
+            kind: "twin",
+            title: twin.name || twin.rappid || "Twin",
+            subtitle: twin.rappid || twin.workspace || "",
+            device: deviceId,
+            status: twin.assigned ? "assigned" : "unassigned",
+            compliance: twin.kind || "twin",
+            active: false,
+          });
+        });
+        (inventory.other_organisms || []).forEach((organism) => {
+          entities.push({
+            kind: "organism",
+            title: organism.name || organism.rappid || "Organism",
+            subtitle: organism.rappid || organism.workspace || "",
+            device: deviceId,
+            status: organism.kind || "other",
+            compliance: organism.kind || "other",
+            active: false,
+          });
+        });
+        const audit = device.audit || {};
+        (audit.assets || []).forEach((asset) => {
+          entities.push({
+            kind: "asset",
+            title: asset.name || asset.type || "Asset",
+            subtitle: asset.path || "",
+            device: deviceId,
+            status: asset.active ? "active" : asset.runnable ? "runnable" : "recorded",
+            compliance: asset.compliance || "unknown",
+            active: Boolean(asset.active),
+          });
+        });
+        (audit.services || []).forEach((service) => {
+          entities.push({
+            kind: "service",
+            title: `${service.process || "process"} :${service.port || "?"}`,
+            subtitle: `${service.address || ""} / pid ${service.pid || "?"}`,
+            device: deviceId,
+            status: service.scope || "unknown",
+            compliance: "runtime-service",
+            active: true,
+          });
+        });
+        (audit.jobs || []).forEach((job) => {
+          entities.push({
+            kind: "job",
+            title: job.label || "Scheduled job",
+            subtitle: job.pid ? `pid ${job.pid}` : "",
+            device: deviceId,
+            status: job.state || job.status || "known",
+            compliance: "scheduled",
+            active: Boolean(job.pid) || String(job.state || "").toLowerCase() === "running",
+          });
+        });
+      });
+      return entities;
+    }
+
+    function renderGlobal(data, query) {
+      const selected = ui.elementFilter.value;
+      const groupBy = ui.groupBy.value;
+      const entities = collectEntities(data)
+        .filter((entity) => selected === "all" || entity.kind === selected)
+        .filter((entity) => {
+          if (!query) return true;
+          return JSON.stringify(entity).toLowerCase().includes(query);
+        })
+        .sort((left, right) => {
+          return String(left.title).localeCompare(String(right.title));
+        });
+      ui.globalSummary.textContent = `${entities.length} visible elements`;
+      ui.globalIndex.replaceChildren();
+      if (!entities.length) {
+        ui.globalIndex.appendChild(node("div", "empty", "No estate elements match this view."));
+        return;
+      }
+      const groups = new Map();
+      entities.forEach((entity) => {
+        const key = entity[groupBy] || "unknown";
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(entity);
+      });
+      [...groups.entries()]
+        .sort(([left], [right]) => String(left).localeCompare(String(right)))
+        .forEach(([group, values]) => {
+          const section = node("section", "global-section");
+          section.appendChild(node("h3", "", `${group} (${values.length})`));
+          const grid = node("div", "global-grid");
+          values.forEach((entity) => {
+            const card = node("article", entity.active ? "entity active" : "entity");
+            card.tabIndex = 0;
+            card.appendChild(node("div", "entity-kind", entity.kind));
+            card.appendChild(node("div", "entity-title", entity.title));
+            card.appendChild(node("div", "entity-subtitle", entity.subtitle));
+            const footer = node("div", "entity-footer");
+            footer.appendChild(node("span", "", entity.device));
+            footer.appendChild(node("span", "", entity.status));
+            card.appendChild(footer);
+            card.addEventListener("click", () => {
+              const target = [...ui.devices.querySelectorAll(".device")].find(
+                (deviceCard) => deviceCard.dataset.device === entity.device
+              );
+              if (target) target.scrollIntoView({ behavior: "smooth", block: "center" });
+            });
+            grid.appendChild(card);
+          });
+          section.appendChild(grid);
+          ui.globalIndex.appendChild(section);
+        });
+    }
+
+    function renderDevice(device) {
+      const active = activeWorkers(device);
+      const card = node("article", active.length ? "device active" : "device");
+      card.dataset.device = device.device || "unknown";
+      if (active.length) {
+        card.dataset.active = "true";
+        card.dataset.activeKey = active[0].key;
+      }
+      const head = node("header", "device-head");
+      const titleWrap = node("div");
+      const title = node("h2", "device-title");
+      title.appendChild(node("span", `dot ${toneFor(device)}`));
+      title.appendChild(document.createTextNode(device.device || "Unknown device"));
+      titleWrap.appendChild(title);
+      titleWrap.appendChild(
+        node(
+          "p",
+          "device-meta",
+          device.skipped
+            ? device.note || "Disabled"
+            : `${device.session || "unknown session"} / ${device.reachable ? "reachable" : "unreachable"}`
+        )
+      );
+      head.appendChild(titleWrap);
+      const badges = node("div", "badges");
+      badges.appendChild(
+        badge(
+          device.skipped ? "disabled" : device.ok ? "healthy" : "attention",
+          toneFor(device)
+        )
+      );
+      if (device.session) badges.appendChild(badge(device.session));
+      if (active.length) badges.appendChild(badge(`${active.length} active`, "warn"));
+      head.appendChild(badges);
+      card.appendChild(head);
+
+      const body = node("div", "device-body");
+      if (device.error) body.appendChild(node("div", "error", device.error));
+      const neighborhoods = device.neighborhoods || [];
+      const catalogs = ((device.catalogs || {}).estates || []);
+      const inventory = device.inventory || {};
+      const audit = device.audit || {};
+      const shape = node("div", "shape");
+      [
+        [neighborhoods.length, "runtime"],
+        [catalogs.length, "estates"],
+        [inventory.total || 0, "Twins"],
+        [inventory.unassigned || 0, "unassigned"],
+        [audit.asset_count || 0, "audit assets"],
+        [audit.service_count || 0, "services"],
+      ].forEach(([value, label]) => {
+        const item = node("div", "shape-item");
+        item.appendChild(node("strong", "", value));
+        item.appendChild(node("span", "", label));
+        shape.appendChild(item);
+      });
+      body.appendChild(shape);
+
+      if (active.length) {
+        body.appendChild(
+          listSection("Active now", active, (worker) => {
+            return row(
+              worker.label,
+              worker.detail,
+              worker.status,
+              worker.status === "blocked" ? "bad" : "warn"
+            );
+          }, true)
+        );
+      }
+
+      body.appendChild(
+        listSection("Runtime neighborhoods", neighborhoods, (item) => {
+          const result = item.result || {};
+          const state = item.ok ? result.state || "known" : "error";
+          return row(
+            (item.manifest || "").split("/").slice(-2, -1)[0] || "neighborhood",
+            item.manifest,
+            state,
+            item.ok ? (state === "running" ? "good" : "warn") : "bad"
+          );
+        })
+      );
+      body.appendChild(
+        listSection("Estate catalogs", catalogs, (estate) => {
+          const count = Array.isArray(estate.cells)
+            ? estate.cells.length
+            : Number(estate.cells) || 0;
+          return row(
+            estate.estate,
+            `${count} neighborhood workers`,
+            estate.state || (estate.ok ? "known" : "error"),
+            estate.ok ? (estate.state === "running" ? "good" : "warn") : "bad"
+          );
+        })
+      );
+      body.appendChild(
+        listSection("Twin inventory", inventory.twins || [], (twin) => {
+          return row(
+            twin.name || twin.rappid,
+            twin.rappid,
+            twin.assigned ? "assigned" : "unassigned",
+            twin.assigned ? "good" : "warn"
+          );
+        })
+      );
+      body.appendChild(
+        listSection("Other organisms", inventory.other_organisms || [], (organism) => {
+          return row(
+            organism.name || organism.rappid || "Unknown organism",
+            organism.rappid,
+            organism.kind || "other",
+            "warn"
+          );
+        })
+      );
+      body.appendChild(
+        listSection("Machine audit", audit.assets || [], (asset) => {
+          return row(
+            asset.name || asset.type || "Asset",
+            asset.path,
+            asset.compliance || "unknown",
+            asset.compliance === "declared-rapp1-unverified"
+              ? "good"
+              : asset.compliance === "malformed"
+              ? "bad"
+              : "warn"
+          );
+        })
+      );
+      body.appendChild(
+        listSection("Active AI services", audit.services || [], (service) => {
+          return row(
+            `${service.process || "process"} :${service.port || "?"}`,
+            `${service.address || ""} / pid ${service.pid || "?"}`,
+            service.scope || "unknown",
+            service.scope === "loopback" ? "good" : "warn"
+          );
+        })
+      );
+      body.appendChild(
+        listSection("Scheduled jobs", audit.jobs || [], (job) => {
+          return row(
+            job.label || "job",
+            job.pid ? `pid ${job.pid}` : "",
+            job.state || job.status || "known",
+            "warn"
+          );
+        })
+      );
+      body.appendChild(
+        listSection("Audit findings", audit.findings || [], (finding) => {
+          return row(
+            finding.kind || "finding",
+            finding.message,
+            finding.severity || "info",
+            finding.severity === "error" ? "bad" : "warn"
+          );
+        })
+      );
+      card.appendChild(body);
+      return card;
+    }
+
+    function render() {
+      if (!snapshot) return;
+      ui.estateName.textContent = snapshot.estate || "Local Network AI Estate";
+      ui.timestamp.textContent = snapshot.observed_at
+        ? `Observed ${snapshot.observed_at}`
+        : "Observation time unavailable";
+      renderMetrics(snapshot);
+      const query = ui.search.value.trim().toLowerCase();
+      renderGlobal(snapshot, query);
+      const devices = (snapshot.devices || []).filter((device) => {
+        if (!query) return true;
+        return JSON.stringify(device).toLowerCase().includes(query);
+      });
+      ui.devices.replaceChildren();
+      if (!devices.length) {
+        ui.devices.appendChild(node("div", "panel empty", "No devices match this filter."));
+      } else {
+        devices.forEach((device) => ui.devices.appendChild(renderDevice(device)));
+      }
+      if (ui.followActive.checked) {
+        const active = ui.devices.querySelector("[data-active='true']");
+        const activeKey = active ? active.dataset.activeKey || "" : "";
+        if (active && activeKey && activeKey !== lastActiveKey) {
+          lastActiveKey = activeKey;
+          active.scrollIntoView({ behavior: "smooth", block: "center" });
+        } else if (!active) {
+          lastActiveKey = "";
+        }
+      }
+    }
+
+    async function refresh(force = false) {
+      if (loading) return;
+      loading = true;
+      ui.refreshButton.disabled = true;
+      ui.liveState.classList.add("loading");
+      ui.liveDot.className = "dot";
+      ui.liveText.textContent = "Observing estate";
+      ui.error.hidden = true;
+      try {
+        const response = await fetch(force ? "/api/refresh" : "/api/status", {
+          cache: "no-store",
+          headers: { "X-RAPP-Herdr-Token": dashboardToken },
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+        snapshot = data;
+        render();
+        ui.liveDot.className = `dot ${data.ok ? "good" : "warn"}`;
+        ui.liveText.textContent = data.ok ? "Estate observed" : "Estate needs attention";
+      } catch (error) {
+        ui.liveDot.className = "dot bad";
+        ui.liveText.textContent = "Observation failed";
+        ui.error.hidden = false;
+        ui.error.textContent = error instanceof Error ? error.message : String(error);
+      } finally {
+        loading = false;
+        ui.refreshButton.disabled = false;
+        ui.liveState.classList.remove("loading");
+      }
+    }
+
+    function showError(error) {
+      ui.error.hidden = false;
+      ui.error.textContent = error instanceof Error ? error.message : String(error);
+      ui.liveDot.className = "dot bad";
+      ui.liveText.textContent = "Action failed";
+    }
+
+    function exportBackup() {
+      const link = document.createElement("a");
+      link.href = `/api/backup?token=${encodeURIComponent(dashboardToken)}`;
+      link.download = "";
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      ui.liveText.textContent = "Backup exported";
+    }
+
+    async function importBackup(file) {
+      if (!file) return;
+      if (file.size > 2 * 1024 * 1024) {
+        throw new Error("Backup exceeds the 2 MB safety limit.");
+      }
+      if (!window.confirm(
+        "Replace the estate manifest with this validated backup? A timestamped rollback copy will be kept."
+      )) {
+        return;
+      }
+      ui.importBackupButton.disabled = true;
+      ui.error.hidden = true;
+      try {
+        const response = await fetch("/api/backup/import", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-RAPP-Herdr-Token": dashboardToken,
+          },
+          body: await file.text(),
+        });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
+        ui.liveDot.className = "dot good";
+        ui.liveText.textContent = "Backup imported";
+        await refresh(true);
+      } finally {
+        ui.importBackupButton.disabled = false;
+      }
+    }
+
+    ui.refreshButton.addEventListener("click", () => refresh(true));
+    ui.exportBackupButton.addEventListener("click", exportBackup);
+    ui.importBackupButton.addEventListener("click", () => ui.backupFile.click());
+    ui.backupFile.addEventListener("change", () => {
+      importBackup(ui.backupFile.files[0])
+        .catch(showError)
+        .finally(() => { ui.backupFile.value = ""; });
+    });
+    ui.search.addEventListener("input", render);
+    ui.followActive.addEventListener("change", render);
+    ui.elementFilter.addEventListener("change", render);
+    ui.groupBy.addEventListener("change", render);
+    setInterval(() => {
+      if (ui.autoRefresh.checked) refresh(false);
+    }, 15000);
+    refresh(true);
+  </script>
+</body>
+</html>

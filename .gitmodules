@@ -1,0 +1,4 @@
+[submodule "herdr"]
+	path = herdr
+	url = https://github.com/herdrdev/herdr.git
+	branch = master

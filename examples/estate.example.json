@@ -1,0 +1,74 @@
+{
+  "schema": "rapp-herdr-estate/1.0",
+  "name": "My Local AI Estate",
+  "buddy_owner": "example-operator",
+  "devices": [
+    {
+      "id": "local",
+      "enabled": true,
+      "transport": "local",
+      "os": "posix",
+      "session": "rapp-estate",
+      "herdr_bin": "~/.local/bin/herdr",
+      "rapp_herdr_bin": "~/.local/bin/rapp-herdr",
+      "inventory_roots": [
+        "~/.rapp/twins"
+      ],
+      "catalog_roots": [
+        "~/.rapp/estates"
+      ],
+      "audit_roots": [
+        "~/.brainstem/twins"
+      ],
+      "probe_target": {
+        "name": "Local Manager Twin",
+        "url": "http://127.0.0.1:7085",
+        "rappid": "rappid:@example-operator/local-manager:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "neighborhoods": [
+        {
+          "manifest": "~/.rapp/neighborhoods/NEIGHBORHOOD_ID/neighborhood.json",
+          "estate_roots": [
+            "~/.rapp/twins"
+          ],
+          "base_port": 7081,
+          "listen_host": "127.0.0.1",
+          "entrypoint": "brainstem.py"
+        }
+      ]
+    },
+    {
+      "id": "remote-mac",
+      "enabled": true,
+      "transport": "ssh",
+      "ssh": "remote-mac",
+      "os": "posix",
+      "session": "rapp-estate",
+      "herdr_bin": "/Users/REMOTE_USER/.local/bin/herdr",
+      "rapp_herdr_bin": "/Users/REMOTE_USER/.local/bin/rapp-herdr",
+      "inventory_roots": [
+        "~/.rapp/twins"
+      ],
+      "catalog_roots": [],
+      "audit_roots": [],
+      "neighborhoods": []
+    },
+    {
+      "id": "offline-device",
+      "enabled": false,
+      "transport": "ssh",
+      "ssh": "offline-device",
+      "os": "posix",
+      "session": "rapp-estate",
+      "herdr_bin": "herdr",
+      "rapp_herdr_bin": "rapp-herdr",
+      "inventory_roots": [
+        "~/.rapp/twins"
+      ],
+      "catalog_roots": [],
+      "audit_roots": [],
+      "neighborhoods": [],
+      "note": "Declared but intentionally disabled until SSH is available."
+    }
+  ]
+}

@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rapp-herdr"
+version = "0.1.0"
+description = "Manage RAPP Twin neighborhoods as supervised Herdr workspaces"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+authors = [{ name = "Kody Wildfeuer" }]
+keywords = ["rapp", "herdr", "digital-twin", "agents", "neighborhood"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+]
+dependencies = []
+
+[project.scripts]
+rapp-herdr = "rapp_herdr.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/kody-w/rapp-herdr"
+Issues = "https://github.com/kody-w/rapp-herdr/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+rapp_herdr = ["*.html"]
